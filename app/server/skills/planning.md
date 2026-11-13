@@ -15,10 +15,8 @@ description: planning the owner's day or week, prioritising tasks, breaking down
 5. **Break big goals down** into next actions that each take under an hour and start with a verb
    ("Draft outline of…", "Email Priya about…"). Offer to add them with `add_task` (with due dates if known),
    or add them directly when the owner asked you to.
-6. **Reminders**: when the owner says "remind me to X on/by Y", `add_task` with the title X and due Y.
-   - A day only → `YYYY-MM-DD` (it appears in that morning's brief).
-   - A time too ("at 6pm", "in 2 hours", "tomorrow 9am") → `YYYY-MM-DD HH:MM`, 24-hour, local time. This one
-     pings the owner's phone at that moment, so get it exactly right: take weekdays from the calendar in the
-     context note, and use run_python for "in N hours/minutes".
-   Confirm in one line with the weekday, date and time, e.g. "Set for Fri 20 Nov, 18:00."
+6. **Reminders**: when the owner says "remind me to X on/by Y", call `add_task` with title X and `due` set to the
+   owner's own words for Y ("next friday 6pm", "tomorrow", "in 2 hours", "20 nov"). Never work out the date
+   yourself: the app does it exactly. With a time it pings the owner's phone; a day alone shows in that morning's
+   brief. Confirm in one line using the date the tool reports back, e.g. "Set for Fri 20 Nov, 18:00."
 7. Mark things done with `complete_task` when the owner says they finished them.

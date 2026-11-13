@@ -53,8 +53,10 @@ SERVER_TOOLS = [
 ]
 
 ASSISTANT_TOOLS = [
-    fn("add_task", "Add a to-do for the owner. due is optional: 'YYYY-MM-DD', or 'YYYY-MM-DD HH:MM' (24-hour) for a "
-       "timed reminder that pings the owner's phone at that time.", {"title": S, "due": S, "notes": S}, ["title"]),
+    fn("add_task", "Add a to-do for the owner. due is optional. Pass the owner's own words for when, e.g. 'next friday 6pm', "
+       "'tomorrow 9am', 'in 2 hours', 'friday', '20 nov 18:00' — the app works out the exact date, so do NOT compute "
+       "dates yourself. With a time, it becomes a reminder that pings the owner's phone at that moment.",
+       {"title": S, "due": S, "notes": S}, ["title"]),
     fn("list_tasks", "List the owner's open tasks.", {}),
     fn("complete_task", "Mark a task done by its id.", {"id": I}, ["id"]),
     fn("save_note", "Save a note for the owner.", {"title": S, "body": S}, ["title", "body"]),
@@ -313,9 +315,20 @@ async def execute(db, cwd, name, args):
         if name == "read_webpage":
             return await read_webpage(args["url"])
         if name == "add_task":
+            due = None
+            if args.get("due"):
+                due = parse_due(str(args["due"]))
+                if not due:
+                    return (f"Error: couldn't understand the date '{args['due']}'. Use words like 'next friday 6pm', "
+                            "'tomorrow', 'in 3 days', or YYYY-MM-DD [HH:MM]."), False
             tid = db.x("INSERT INTO tasks(title,notes,due,created) VALUES(?,?,?,?)",
-                       (args["title"], args.get("notes") or "", args.get("due") or None, time.time()))
-            return f"Added task #{tid}: {args['title']}" + (f" (due {args['due']})" if args.get("due") else ""), True
+                       (args["title"], args.get("notes") or "", due, time.time()))
+            if not due:
+                return f"Added task #{tid}: {args['title']}", True
+            import datetime as _dt
+            d = _dt.datetime.strptime(due, "%Y-%m-%d %H:%M" if len(due) > 10 else "%Y-%m-%d")
+            when = d.strftime("%a %d %b %Y") + (d.strftime(", %H:%M") if len(due) > 10 else "")
+            return f"Added task #{tid}: {args['title']}, due {when}. Tell the owner exactly this date.", True
         if name == "list_tasks":
             rows = db.q("SELECT id,title,due FROM tasks WHERE done=0 ORDER BY due IS NULL, due, id LIMIT 50")
             return "\n".join(f"#{r['id']} {r['title']}" + (f" (due {r['due']})" if r["due"] else "") for r in rows) or "No open tasks.", True
@@ -355,6 +368,89 @@ async def execute(db, cwd, name, args):
         return f"Error: a service did not answer ({e.__class__.__name__}).", False
     except Exception as e:  # tool errors go back to the model, never crash the run
         return f"Error: {e}", False
+
+
+_WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+_MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+
+
+def parse_due(text, now=None):
+    """Turns the owner's words for a time ('next friday 6pm', 'tomorrow', 'in 2 hours', '20 nov 18:00',
+    '2026-11-20') into 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM' in local time. Returns None if it can't."""
+    import datetime as dt
+    now = now or dt.datetime.now()
+    s = " " + re.sub(r"[,.]", " ", text.strip().lower()) + " "
+    m = re.fullmatch(r"\s*(\d{4}-\d{2}-\d{2})(?:[ t](\d{1,2}):(\d{2}))?\s*", s)
+    if m:
+        try:
+            d = dt.datetime.strptime(m.group(1), "%Y-%m-%d")
+        except ValueError:
+            return None
+        return m.group(1) + (f" {int(m.group(2)):02d}:{m.group(3)}" if m.group(2) else "")
+    # relative offsets: in 2 hours / in 30 minutes / in 3 days / in 2 weeks
+    m = re.search(r"\bin\s+(\d+|an?|one|two|three)\s*(min|minute|minutes|hr|hrs|hour|hours|day|days|week|weeks)\b", s)
+    if m:
+        n = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3}.get(m.group(1)) or int(m.group(1))
+        unit = m.group(2)
+        if unit.startswith("min"):
+            return (now + dt.timedelta(minutes=n)).strftime("%Y-%m-%d %H:%M")
+        if unit.startswith("h"):
+            return (now + dt.timedelta(hours=n)).strftime("%Y-%m-%d %H:%M")
+        day = now + dt.timedelta(days=n * (7 if unit.startswith("week") else 1))
+        return day.strftime("%Y-%m-%d") + _time_part(s)
+    # the day
+    day = None
+    if re.search(r"\bday after tomorrow\b", s):
+        day = now + dt.timedelta(days=2)
+    elif re.search(r"\b(tomorrow|tmrw|tmr)\b", s):
+        day = now + dt.timedelta(days=1)
+    elif re.search(r"\b(today|tonight|this evening|this morning|this afternoon)\b", s):
+        day = now
+    elif re.search(r"\bnext week\b", s):
+        day = now + dt.timedelta(days=7 - now.weekday())  # next Monday
+    else:
+        for i, wd in enumerate(_WEEKDAYS):
+            if re.search(rf"\b{wd[:3]}(?:{wd[3:]})?\b", s):
+                ahead = (i - now.weekday()) % 7 or 7  # the first one after today
+                day = now + dt.timedelta(days=ahead)
+                break
+    if day is None:
+        m = re.search(r"\b(\d{1,2})\s*(?:st|nd|rd|th)?\s+(" + "|".join(_MONTHS) + r")[a-z]*\b", s) or \
+            re.search(r"\b(" + "|".join(_MONTHS) + r")[a-z]*\s+(\d{1,2})(?:st|nd|rd|th)?\b", s)
+        if m:
+            a, b = m.groups()
+            dd, mon = (int(a), b) if a.isdigit() else (int(b), a)
+            try:
+                day = now.replace(month=_MONTHS.index(mon[:3]) + 1, day=dd)
+                if day.date() < now.date():
+                    day = day.replace(year=now.year + 1)
+            except ValueError:
+                return None
+    t = _time_part(s)
+    if day is None:
+        if not t:
+            return None
+        day = now  # only a time: today, or tomorrow if that time has passed
+        if f"{now:%Y-%m-%d}{t}" <= f"{now:%Y-%m-%d %H:%M}":
+            day = now + dt.timedelta(days=1)
+    return day.strftime("%Y-%m-%d") + t
+
+
+def _time_part(s):
+    """' HH:MM' from '6pm', '6:30 pm', '18:00', 'noon', 'evening'…, or '' when no time is given."""
+    m = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", s)
+    if m:
+        h, mi = int(m.group(1)) % 12, int(m.group(2) or 0)
+        h += 12 if m.group(3) == "pm" else 0
+        return f" {h:02d}:{mi:02d}" if h < 24 and mi < 60 else ""
+    m = re.search(r"\b(?:at\s+)?([01]?\d|2[0-3]):([0-5]\d)\b", s)
+    if m:
+        return f" {int(m.group(1)):02d}:{m.group(2)}"
+    for word, hhmm in (("noon", "12:00"), ("midnight", "23:59"), ("morning", "09:00"), ("afternoon", "15:00"),
+                       ("evening", "18:00"), ("tonight", "21:00"), ("night", "21:00")):
+        if re.search(rf"\b{word}\b", s):
+            return " " + hhmm
+    return ""
 
 
 def _q(s):
