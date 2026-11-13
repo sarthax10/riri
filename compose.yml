@@ -89,7 +89,8 @@ services:
       SEARXNG_SECRET: ${WORKBENCH_TOKEN}
       SEARXNG_BASE_URL: http://searxng:8080/
     volumes:
-      - ./searxng:/etc/searxng
+      # only the settings file, read-only: the container takes ownership of whatever folder it gets
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
     networks: [sandbox]
     cap_drop: [ALL]
     cap_add: [CHOWN, SETGID, SETUID]
