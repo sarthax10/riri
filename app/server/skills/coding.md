@@ -24,6 +24,6 @@ description: building a feature or making a change in a codebase, start to finis
    `apply_patch <<'EOF'` … `*** Begin Patch` / `*** Update File: path` / `@@` / `-old` / `+new` / `*** End Patch` … `EOF`.
 9. **Finish** with 2-3 sentences: what changed (files), how you verified, anything left for the owner.
 
-Useful commands in the workbench: `python3 -m pytest -q path`, `python3 -m venv .venv && . .venv/bin/activate`,
-`pip install --user pkg`, `npm ci`, `npm test`, `node file.js`, `git diff --stat`, `rg -n pattern`.
-The workbench has internet access for installing packages; it cannot see the rest of the server.
+Useful commands on the server: `python3 -m pytest -q path`, `python3 -m venv .venv && . .venv/bin/activate`,
+`pip install pkg` (inside a venv), `npm ci`, `npm test`, `node file.js`, `git status`, `git diff --stat`,
+`docker compose ps`, `docker logs --tail 50 <name>`. You work as the owner's user: no sudo without a password.
