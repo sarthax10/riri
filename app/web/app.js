@@ -769,7 +769,7 @@ async function finish(L, how) {
 }
 function notify(title, body) {
   if (!document.hidden || S.settings.notify === false || !("Notification" in window) || Notification.permission !== "granted") return;
-  try { new Notification(title, { body: String(body || "").slice(0, 140), icon: "/icon.svg", tag: "reliquary" }); } catch { /* not supported */ }
+  try { new Notification(title, { body: String(body || "").slice(0, 140), icon: "/icon-192.png", tag: "riri" }); } catch { /* not supported */ }
 }
 function renderLive() {
   const box = $("#live"), L = S.live; if (!box || !L) return;

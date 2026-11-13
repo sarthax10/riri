@@ -13,8 +13,8 @@ self.addEventListener("push", (event) => {
     }
     await self.registration.showNotification(data.title || "RiRi", {
       body: data.body || "",
-      icon: "/icon.svg",
-      badge: "/icon.svg",
+      icon: "/icon-192.png",
+      badge: "/icon-192.png",
       tag: data.tag || "reliquary",
       renotify: true,
       data: { url: data.url || "/" },
