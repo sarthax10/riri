@@ -604,7 +604,11 @@ from fastapi.responses import Response as RawResponse
 
 @app.get("/api/host")
 async def host_status(kind=Depends(need)):
-    return {"ready": T.host.ready, "home": T.host.home, "locked": bool(server_gate()), "user": os.environ.get("RELIQUARY_HOST_USER", "")}
+    if not T.host.ready:
+        await T.host.setup()
+    # the public half of RiRi's key, so the page can show the one command that authorises it
+    return {"ready": T.host.ready, "home": T.host.home, "locked": bool(server_gate()),
+            "user": os.environ.get("RELIQUARY_HOST_USER", ""), "pubkey": T.host.pubkey()}
 
 
 async def fs(op, **kw):

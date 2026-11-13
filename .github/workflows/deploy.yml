@@ -56,7 +56,7 @@ jobs:
             echo "MODEL=${{ vars.MODEL || 'gpt-oss-20b-Q4_K_M.gguf' }}"
             echo "CTX=${{ vars.CTX || '32768' }}"
             echo "THREADS=${{ vars.THREADS || '4' }}"
-            echo "CACHE_RAM=${{ vars.CACHE_RAM || '1024' }}"
+            echo "CACHE_RAM=${{ vars.CACHE_RAM || '0' }}"
             [ -n "${{ vars.CADDY_DATA_VOLUME }}" ] && echo "CADDY_DATA_VOLUME=${{ vars.CADDY_DATA_VOLUME }}"
             echo "WORKBENCH_TOKEN=$WORKBENCH_TOKEN"
           } > env.out

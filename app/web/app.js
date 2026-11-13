@@ -310,7 +310,7 @@ async function renderHome() {
       <h1 class="hero-greet">${esc(part)}${who ? `,<br><b>${esc(who)}.</b>` : "."}</h1><p class="hero-status" id="hero-status">Waking up…</p></div>
     <div class="hero-reli" id="hero-reli">${Reli.svg(210, "idle")}</div>
   </section>`);
-  const comp = composer({ placeholder: `Ask ${AN()} anything, or type / for commands…`, onSend: async (text) => {
+  const comp = composer({ placeholder: innerWidth < 600 ? `Ask ${AN()} anything…` : `Ask ${AN()} anything, or type / for commands…`, onSend: async (text) => {
     if (await runSlash(text)) return;
     askNotify();
     const s = await api("/api/sessions", { method: "POST", body: { mode: "chat" } });
@@ -386,7 +386,13 @@ async function setupCard(home, cards) {
   }
   cards.prepend(card);
 }
-function prettyModel(m) { return String(m || "model").replace(/[-_.](UD-)?(Q\d\w*|MXFP4\w*|F16|BF16)$/i, "").replace(/-(\d+)b$/i, " $1B"); }
+function prettyModel(m) {
+  // "p-e-w_gpt-oss-20b-heretic-MXFP4_MOE" -> "gpt-oss 20B (uncensored)"
+  let s = String(m || "model").replace(/^[\w.-]+?_(?=[a-z])/i, (x) => (/^(p-e-w|bartowski|unsloth|huihui-ai)_/i.test(x) ? "" : x));
+  const free = /heretic|abliterat|uncensor/i.test(s);
+  s = s.replace(/[-_.](heretic|abliterated|uncensored)/ig, "").replace(/[-_.](UD-)?(Q\d\w*|IQ\d\w*|MXFP4\w*|F16|BF16)$/i, "").replace(/-(\d+)b$/i, " $1B");
+  return free ? `${s} (uncensored)` : s;
+}
 function heroLine(d) {
   if (!d.online) return `${AN()} is waking up. Replies begin once the model has loaded.`;
   const tps = d.engine.speed.tg_tps;
@@ -445,7 +451,7 @@ function renderConversation() {
   stage.append(tr);
   const foot = h(`<div class="stage-foot"></div>`);
   const comp = composer({
-    placeholder: agent ? `Describe a change, or type / for commands…` : "Reply, or type / for commands…",
+    placeholder: innerWidth < 600 ? "Reply…" : agent ? `Describe a change, or type / for commands…` : "Reply, or type / for commands…",
     running: !!S.live,
     onSend: async (text) => {
       if (await runSlash(text)) return;
@@ -944,6 +950,7 @@ async function renderFS(path) {
         <button class="btn btn-accent" type="button">Set up two-step sign-in</button></div></div>`;
       $(".lock-card button", stage).onclick = totpSetup;
     } else {
+      if (/permission denied|cannot reach the server/i.test(e.message)) return connectCard(stage);
       stage.innerHTML = `<div class="page"><div class="notice err">${esc(e.message)}</div><p><a href="#/fs">Back to your home folder</a></p></div>`;
     }
     return;
@@ -1003,6 +1010,17 @@ async function renderFS(path) {
     renderFS(data.path);
   };
   renderFeed();
+}
+async function connectCard(stage) {
+  const hst = await api("/api/host").catch(() => ({}));
+  const cmd = hst.pubkey ? `echo 'from="172.16.0.0/12",no-port-forwarding,no-agent-forwarding,no-X11-forwarding ${hst.pubkey}' >> ~/.ssh/authorized_keys` : "";
+  stage.innerHTML = `<div class="page"><div class="page-h"><div><h1>Files</h1><p>Browse, edit and manage everything on your server.</p></div></div>
+    <div class="card lock-card"><b>Connect ${esc(AN())} to your server</b>
+      <p>${esc(AN())} has her own SSH key, accepted only from this app's private network. Authorise it once: SSH into the server as <code>${esc(hst.user || "your user")}</code> and run:</p>
+      <div class="codeblock" style="width:100%"><div class="codeblock-h"><span>bash</span><button class="copy-code" type="button">Copy</button></div><pre><code></code></pre></div>
+      <button class="btn btn-accent" type="button" data-again>Check again</button></div></div>`;
+  $("code", stage).textContent = cmd || "The key hasn't been created yet. Restart the app and try again.";
+  $("[data-again]", stage).onclick = () => renderFS(FS.path || "~");
 }
 function fmtSize(n) { return n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(1) + " KB" : n < 1073741824 ? (n / 1048576).toFixed(1) + " MB" : (n / 1073741824).toFixed(2) + " GB"; }
 async function openFsFile(path, it) {
