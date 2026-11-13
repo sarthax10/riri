@@ -117,6 +117,10 @@ class Host:
         await self.ensure_key()
         code, out, _ = await self._run(f"mkdir -p ~/.local/share/riri && cat > ~/{HELPER_PATH} && echo ok:$HOME", HELPER, 30)
         text = out.decode(errors="replace").strip()
+        if code == 0:
+            # gpt-oss writes multi-file edits in OpenAI's apply_patch format; give it that command on the server
+            patcher = open(os.path.join(os.path.dirname(__file__), "apply_patch.py"), encoding="utf-8").read()
+            await self._run("mkdir -p ~/.local/bin && cat > ~/.local/bin/apply_patch && chmod 755 ~/.local/bin/apply_patch", patcher, 30)
         if code == 0 and "ok:" in text:
             self.home = text.split("ok:")[-1].strip()
             self.ready = True

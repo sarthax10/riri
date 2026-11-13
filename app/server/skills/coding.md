@@ -17,9 +17,12 @@ description: building a feature or making a change in a codebase, start to finis
 6. **Verify for real.** Run the narrowest check that proves it: the one test file, `python -m py_compile`,
    `node --check`, the build, or running the script with sample input. Read the output; a passing exit code with
    an error message in it is not a pass.
-7. **If a check fails**, read the error, fix the cause (not the test), re-run. Twice failed on the same idea →
-   stop and report what you know.
-8. **Finish** with 2-3 sentences: what changed (files), how you verified, anything left for the owner.
+7. **If a check fails**, read the error, fix the cause, re-run. Never loosen a test (changing an expected value,
+   deleting an assertion, skipping it) just to make it pass; if you believe the test is wrong, say why first.
+   Twice failed on the same idea → stop and report what you know.
+8. **Multi-place edits**: `apply_patch` is installed on the server. Pipe it a patch:
+   `apply_patch <<'EOF'` … `*** Begin Patch` / `*** Update File: path` / `@@` / `-old` / `+new` / `*** End Patch` … `EOF`.
+9. **Finish** with 2-3 sentences: what changed (files), how you verified, anything left for the owner.
 
 Useful commands in the workbench: `python3 -m pytest -q path`, `python3 -m venv .venv && . .venv/bin/activate`,
 `pip install --user pkg`, `npm ci`, `npm test`, `node file.js`, `git diff --stat`, `rg -n pattern`.
