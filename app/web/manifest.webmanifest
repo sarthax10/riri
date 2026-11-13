@@ -1,0 +1,9 @@
+{
+  "name": "RiRi",
+  "short_name": "RiRi",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1B1820",
+  "theme_color": "#1B1820",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

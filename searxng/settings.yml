@@ -1,0 +1,14 @@
+# RiRi's private search engine. Only the Reliquary app talks to it (internal Docker network), in JSON.
+use_default_settings: true
+general:
+  instance_name: "reliquary-search"
+server:
+  limiter: false
+  image_proxy: false
+  public_instance: false
+search:
+  safe_search: 0
+  autocomplete: ""
+  formats:
+    - html
+    - json

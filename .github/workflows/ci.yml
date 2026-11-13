@@ -1,0 +1,44 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Python compiles
+        run: python -m py_compile app/server/*.py workbench/exec_server.py cli/reliquary.py bench/*.py
+
+      - name: JavaScript parses
+        run: |
+          node --check app/web/app.js
+          node --check app/web/reli.js
+          node --check app/web/sw.js
+
+      - name: Compose file is valid
+        run: |
+          printf 'DOMAIN=example.com\nHOST_USER=riri\nWORKBENCH_TOKEN=x\nMODEL=m.gguf\n' > .env
+          docker compose config -q
+          rm .env
+
+      - name: No secrets committed
+        run: |
+          if git ls-files | grep -E '(^|/)\.env$|\.pem$|host_key|\.token$'; then echo "secret-looking file is tracked"; exit 1; fi
+          if git grep -nE 'BEGIN [A-Z ]*PRIVATE KEY|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}' -- . ':!.github/workflows/ci.yml'; then
+            echo "secret-looking text found"; exit 1
+          fi

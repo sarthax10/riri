@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="420" viewBox="0 0 1280 420">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0E0F12"/><stop offset="1" stop-color="#15171B"/>
+    </linearGradient>
+    <radialGradient id="warm" cx="80%" cy="105%" r="65%">
+      <stop offset="0" stop-color="#FF6B2C" stop-opacity=".30"/><stop offset=".55" stop-color="#FF6B2C" stop-opacity=".06"/><stop offset="1" stop-color="#FF6B2C" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="dots" width="6" height="6" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r=".8" fill="#FFFFFF" fill-opacity=".05"/></pattern>
+    <linearGradient id="arc" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FFB27A"/><stop offset=".6" stop-color="#FF6B2C"/><stop offset="1" stop-color="#E8432A"/>
+    </linearGradient>
+    <radialGradient id="glow"><stop offset="0" stop-color="#FF7A3D" stop-opacity=".5"/><stop offset=".55" stop-color="#FF6B2C" stop-opacity=".08"/><stop offset="1" stop-color="#FF6B2C" stop-opacity="0"/></radialGradient>
+  </defs>
+  <rect width="1280" height="420" rx="28" fill="url(#bg)"/>
+  <rect width="1280" height="420" rx="28" fill="url(#dots)"/>
+  <rect width="1280" height="420" rx="28" fill="url(#warm)"/>
+  <rect x=".5" y=".5" width="1279" height="419" rx="27.5" fill="none" stroke="#FFFFFF" stroke-opacity=".07"/>
+
+  <text x="96" y="122" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="18" fill="#9B9EA6" letter-spacing="1">
+    <tspan fill="#FF6B2C">—</tspan>  a private AI that lives on your own server
+  </text>
+  <text x="90" y="262" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-weight="200" font-size="168" fill="#F2E6D6" letter-spacing="-6">RiRi</text>
+  <text x="96" y="318" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="22" fill="#B4B6BC">Chat, code and run the machine — one model, one CPU, no cloud.</text>
+
+  <g transform="translate(1010 210)">
+    <circle r="150" fill="url(#glow)"/>
+    <circle r="112" fill="none" stroke="#FFFFFF" stroke-opacity=".08" stroke-width="3"/>
+    <circle r="112" fill="none" stroke="url(#arc)" stroke-width="7" stroke-linecap="round" stroke-dasharray="704" stroke-dashoffset="190" transform="rotate(-90)"/>
+    <circle r="15" fill="url(#arc)"/>
+  </g>
+</svg>

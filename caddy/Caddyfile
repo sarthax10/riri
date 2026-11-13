@@ -1,0 +1,23 @@
+{$DOMAIN} {
+	encode @compressible zstd gzip
+	@compressible not path /api/runs/*/events
+
+	request_body {
+		max_size 25MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		Permissions-Policy "camera=(), microphone=(self), geolocation=()"
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+		-Server
+	}
+
+	reverse_proxy app:8000 {
+		# replies stream out token by token
+		flush_interval -1
+	}
+}

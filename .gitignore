@@ -1,0 +1,34 @@
+# Secrets and machine-specific settings: never committed
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+host_key*
+*.token
+known_hosts
+
+# Runtime data (chats, tasks, notes, memories, keys) and the coding workspaces
+data/
+data-dev/
+workspaces/
+logs-switch.txt
+.switch-ok
+.switch-rolled-back
+
+# Design references are other people's work (Pinterest pins): kept locally, not published
+design/*.jpg
+design/*.jpeg
+design/*.png
+
+# One-off migration script for the original server
+switch.sh
+
+# Python / editor noise
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

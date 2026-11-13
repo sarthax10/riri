@@ -1,0 +1,156 @@
+# Reliquary: a private model, its website and its coding sandbox.   Run from ~/reliquary:  docker compose up -d --build
+# .env beside this file (mode 600) holds MODEL, CTX, THREADS and WORKBENCH_TOKEN.
+name: reliquary
+
+services:
+  # llama.cpp serving one model on the CPU. Reachable only from the app (internal network, no internet).
+  llm:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: reliquary-llm
+    restart: unless-stopped
+    command: >
+      -m /models/${MODEL} --host 0.0.0.0 --port 8080
+      -c ${CTX:-32768} -np 1 -t ${THREADS:-4} -tb ${THREADS:-4}
+      -fa on -ctk q8_0 -ctv q8_0 --cache-reuse 256 --cache-ram ${CACHE_RAM:-0}
+      --slot-save-path /slots --jinja --reasoning-format auto
+      --timeout 7200 --no-webui --metrics ${LLM_EXTRA:-}
+    volumes:
+      - ~/llm/models:/models:ro
+      - llm-slots:/slots
+    networks: [core]
+    ulimits:
+      memlock: -1
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 300s
+
+  # The website and API. Port 8700 on localhost is for the `reliquary` terminal client.
+  app:
+    build: ./app
+    container_name: reliquary-app
+    restart: unless-stopped
+    environment:
+      RELIQUARY_LLM: http://llm:8080
+      RELIQUARY_WORKBENCH: http://workbench:7070
+      RELIQUARY_WORKBENCH_TOKEN: ${WORKBENCH_TOKEN}
+      RELIQUARY_HOST_USER: ${HOST_USER:?set HOST_USER in .env}
+      RELIQUARY_DOMAIN: ${DOMAIN}
+      TZ: ${TZ:-Asia/Kolkata}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data:/data
+      - ./workspaces:/workspaces
+    ports:
+      - "127.0.0.1:8700:8000"
+    networks: [core, sandbox]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    depends_on: [llm, workbench]
+
+  # Testing only (docker compose --profile dev up -d app-dev): same app, no sign-in, its own data,
+  # reachable only from the server itself (e.g. through an SSH tunnel to 127.0.0.1:8701).
+  app-dev:
+    profiles: [dev]
+    build: ./app
+    container_name: reliquary-app-dev
+    environment:
+      RELIQUARY_LLM: http://llm:8080
+      RELIQUARY_WORKBENCH: http://workbench:7070
+      RELIQUARY_WORKBENCH_TOKEN: ${WORKBENCH_TOKEN}
+      RELIQUARY_DEV_NOAUTH: "1"
+      RELIQUARY_HOST_USER: ${HOST_USER:?set HOST_USER in .env}
+      RELIQUARY_DOMAIN: ${DOMAIN}
+      TZ: ${TZ:-Asia/Kolkata}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data-dev:/data
+      - ./workspaces:/workspaces
+    ports:
+      - "127.0.0.1:8701:8000"
+    networks: [core, sandbox]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    mem_limit: 512m
+
+  # RiRi's private web search: a SearXNG metasearch instance only the app can reach.
+  searxng:
+    image: searxng/searxng:latest
+    container_name: reliquary-searxng
+    restart: unless-stopped
+    environment:
+      SEARXNG_SECRET: ${WORKBENCH_TOKEN}
+      SEARXNG_BASE_URL: http://searxng:8080/
+    volumes:
+      - ./searxng:/etc/searxng
+    networks: [sandbox]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
+    mem_limit: 384m
+
+  # Where the agent's commands run: unprivileged, only the workspaces mounted, no Docker socket.
+  workbench:
+    build: ./workbench
+    container_name: reliquary-workbench
+    restart: unless-stopped
+    environment:
+      WORKBENCH_TOKEN: ${WORKBENCH_TOKEN}
+      TZ: ${TZ:-Asia/Kolkata}
+    volumes:
+      - ./workspaces:/workspaces
+      - workbench-home:/home/agent
+    networks: [sandbox]
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 1536m
+    pids_limit: 512
+
+  # Public front door: https://$DOMAIN (forward ports 80 and 443 from your router to this machine).
+  caddy:
+    image: caddy:2.8.4-alpine
+    container_name: reliquary-caddy
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+    ports:
+      - "80:80"
+      - "127.0.0.1:8443:443"   # 443 itself belongs to sslh, which hands HTTPS connections on to this port
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [edge, core]
+    depends_on: [app]
+
+  # SSH and HTTPS share port 443: SSH clients go to the host's sshd, TLS to Caddy.
+  sslh:
+    build: ./sslh
+    container_name: reliquary-sslh
+    restart: unless-stopped
+    network_mode: host
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    depends_on: [caddy]
+
+networks:
+  edge: {}
+  core:
+    internal: true
+  sandbox: {}
+
+volumes:
+  llm-slots:
+  workbench-home:
+  caddy-config:
+  # Caddy's certificates. Set CADDY_DATA_VOLUME in .env to reuse an existing volume (and its certificate).
+  caddy-data:
+    name: ${CADDY_DATA_VOLUME:-riri_caddy_data}
