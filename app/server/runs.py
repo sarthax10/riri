@@ -9,6 +9,7 @@ memories are captured when the session starts), and history is only ever appende
 reuse everything it has already read.
 """
 import asyncio
+import hashlib
 import json
 import os
 import time
@@ -261,9 +262,15 @@ class Engine:
         meta = session["meta"]
         if meta.get("system"):
             return meta["system"], meta.get("context", "")
+        system, context = self.new_system(), self.new_context(session)
+        meta["system"], meta["context"] = system, context
+        self.db.update_session(session["id"], meta=meta)
+        return system, context
+
+    def new_context(self, session):
+        """The note on a conversation's first message: the same for every new chat on a given day."""
         settings = self.db.get("settings", {})
         name = settings.get("name") or "the owner"
-        assistant = settings.get("assistant_name") or "RiRi"
         instructions = settings.get("instructions", "").strip()
         instructions = f"{name}'s standing instructions:\n{instructions}\n" if instructions else ""
         date = time.strftime("%A %d %B %Y")
@@ -273,12 +280,16 @@ class Engine:
         memories = ("What you know about " + name + ":\n" + "\n".join("- " + m["fact"] for m in mems) + "\n") if mems else ""
         kind = (" (a coding session: work on the project in this folder; read its README or AGENTS.md first if unfamiliar)"
                 if session["mode"] == "agent" else "")
-        system = SYSTEM.format(assistant=assistant, name=name, skills=T.skills_index())
-        context = CONTEXT.format(name=name, date=date, calendar=calendar, cwd=T.session_cwd(session), kind=kind,
-                                 memories=memories, instructions=instructions)
-        meta["system"], meta["context"] = system, context
-        self.db.update_session(session["id"], meta=meta)
-        return system, context
+        return CONTEXT.format(name=name, date=date, calendar=calendar, cwd=T.session_cwd(session), kind=kind,
+                              memories=memories, instructions=instructions)
+
+    def new_system(self):
+        settings = self.db.get("settings", {})
+        return SYSTEM.format(assistant=settings.get("assistant_name") or "RiRi", name=settings.get("name") or "the owner",
+                             skills=T.skills_index())
+
+    def default_effort(self):
+        return self.db.get("settings", {}).get("effort") or "low"
 
     def _history(self, session):
         system, context = self._frozen_system(session)
@@ -316,7 +327,9 @@ class Engine:
                 self.waiting.remove(me)
                 self.current = run.id
                 run.status = "running"
-                await self._switch_slot(session["id"])
+                fresh = await self._switch_slot(session["id"])
+                if fresh and messages and messages[0]["role"] == "system":
+                    await self._use_base(messages, session, tool_list, effort)
                 await run.emit("phase", phase="reading")
                 content, reasoning, calls, timings = [], [], {}, {}
                 writing = False
@@ -461,11 +474,13 @@ class Engine:
     SLOT_KEEP = 12        # conversations whose state is kept
 
     async def _switch_slot(self, sid):
+        """Returns True when the conversation has no saved state (a new one, or one whose state was evicted)."""
         owner = self.db.get("slot_owner")
         if owner == sid:
-            return
+            return False
         files = self.db.get("slot_files", {})  # sid -> {"file": name, "t": last used}
-        if owner:
+        files.pop("__reflect__", None)
+        if owner and not owner.startswith("__"):   # "__reflect__", "__base__": nothing worth keeping
             used = {v["file"] for k, v in files.items() if k != owner}
             # a separate prefix per app (the preview copy uses "dev-"), so two apps never overwrite each other's state
             pre = os.environ.get("RELIQUARY_SLOT_PREFIX", "")
@@ -491,6 +506,79 @@ class Engine:
                 files.pop(sid, None)
         self.db.put("slot_files", files)
         self.db.put("slot_owner", sid)
+        return sid not in files
+
+    # ---------- the shared start of every conversation ----------
+    # Every conversation begins with the same ~2,700-token system prompt and tools, and every chat started today
+    # with the same ~150-token context note (date, calendar, what RiRi knows about the owner). The model (gpt-oss)
+    # uses sliding-window attention, so it can only reuse a cached prompt when the new one branches off within ~128
+    # tokens of the cache's end: a long previous chat shares the start but can't be cut back to it, and a new chat
+    # would re-read everything (over 2 minutes on this CPU). So two states are saved: "sys" (system prompt + tools,
+    # rebuilt when they change) and "ctx" (that plus today's note, rebuilt daily or when memories change, in seconds,
+    # from "sys"). A new chat starts from "ctx" and only reads its own message.
+    def _base_key(self, msgs, tools, effort):
+        return hashlib.sha1(json.dumps([msgs, tools, effort], sort_keys=True).encode()).hexdigest()[:16]
+
+    async def _use_base(self, messages, session, tools, effort):
+        ctx = session["meta"].get("context") or ""
+        ctx_msgs = None
+        if ctx and len(messages) > 1 and messages[1]["role"] == "user" and messages[1]["content"].startswith(ctx):
+            ctx_msgs = [messages[0], {"role": "user", "content": ctx}]
+        try:
+            await self._ensure_bases([messages[0]], ctx_msgs, tools, effort)
+        except Exception as e:
+            print("prompt prefix cache:", repr(e), flush=True)
+
+    async def _ensure_bases(self, sys_msgs, ctx_msgs, tools, effort):
+        """Leaves the model holding the longest saved shared start that matches, building what's missing."""
+        bases = self.db.get("slot_bases") or {}
+        pre = os.environ.get("RELIQUARY_SLOT_PREFIX", "")
+        ks = self._base_key(sys_msgs, tools, effort)
+        kc = self._base_key(ctx_msgs, tools, effort) if ctx_msgs else None
+
+        async def restore(layer, key):
+            b = bases.get(layer) or {}
+            return b.get("key") == key and bool((await self.llm.slot("restore", b["file"])).get("n_restored"))
+
+        async def build(layer, msgs, key):
+            async for _ in self.llm.stream(msgs, tools=tools, max_tokens=1, effort=effort):
+                pass
+            name = f"{pre}base-{layer}.bin"
+            if (await self.llm.slot("save", name)).get("n_saved"):
+                bases[layer] = {"key": key, "file": name, "t": time.time()}
+                self.db.put("slot_bases", bases)
+
+        if kc and await restore("ctx", kc):
+            return
+        if not await restore("sys", ks):
+            await build("sys", sys_msgs, ks)
+        if kc:
+            await build("ctx", ctx_msgs, kc)   # seconds: only the note is new
+
+    def bases_current(self):
+        sys_msgs = [{"role": "system", "content": self.new_system()}]
+        ctx_msgs = sys_msgs + [{"role": "user", "content": self.new_context({"mode": "chat", "workspace": None})}]
+        bases, effort = self.db.get("slot_bases") or {}, self.default_effort()
+        ok = all((bases.get(l) or {}).get("key") == self._base_key(m, T.ALL_TOOLS, effort) for l, m in (("sys", sys_msgs), ("ctx", ctx_msgs)))
+        return ok, sys_msgs, ctx_msgs
+
+    async def warm_base(self):
+        """While idle: keep the shared start saved, so even the first chat after a restart or a new day replies in seconds."""
+        ok, sys_msgs, ctx_msgs = self.bases_current()
+        if ok or self.lock.locked() or self.waiting:
+            return
+        async with self.lock:
+            self.current = "__base__"
+            try:
+                owner = self.db.get("slot_owner")
+                if owner and not owner.startswith("__"):
+                    await self._switch_slot("__base__")   # saves the open conversation's state first
+                self.db.put("slot_owner", "__base__")
+                await self._ensure_bases(sys_msgs, ctx_msgs, T.ALL_TOOLS, self.default_effort())
+            except Exception as e:
+                print("prompt prefix cache:", repr(e), flush=True)
+            finally:
+                self.current = None
 
     async def _save_todos(self, run, session, items):
         fresh = (self.db.session(session["id"]) or session)["meta"]

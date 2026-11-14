@@ -43,6 +43,15 @@ class Scheduler:
                 print("artifact check failed:", repr(e), flush=True)
         if self.learner:
             await self.learner.idle_tick()
+        eng = self.engine
+        if not getattr(eng, "warming", False) and not any(r.finished is None for r in eng.runs.values()):
+            async def warm():
+                eng.warming = True
+                try:
+                    await eng.warm_base()
+                finally:
+                    eng.warming = False
+            asyncio.create_task(warm())   # in the background: it takes minutes the first time, reminders must not wait
         now = time.localtime()
         today, hhmm = time.strftime("%Y-%m-%d", now), time.strftime("%H:%M", now)
         s = self.settings()
