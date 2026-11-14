@@ -268,7 +268,43 @@ async def dashboard(kind=Depends(need)):
                    "memories": db.one("SELECT COUNT(*) AS n FROM memories")["n"],
                    "tasks_done": db.one("SELECT COUNT(*) AS n FROM tasks WHERE done=1")["n"]},
         "workspaces": workspace_list(),
+        **home_extras(),
     }
+
+
+def home_extras():
+    """Home's "what matters now": live work, what's being served, what changed, what was learned."""
+    titles = {}
+
+    def title(sid):
+        if sid not in titles:
+            s = db.session(sid) if sid else None
+            titles[sid] = s["title"] if s else None
+        return titles[sid]
+
+    now = []
+    for r in engine.runs.values():
+        if r.finished is not None:
+            continue
+        last = next((e for e in reversed(r.events) if e["type"] == "tool_call"), None)
+        now.append({"run_id": r.id, "session_id": r.session_id, "title": title(r.session_id), "kind": r.kind, "status": r.status,
+                    "started": r.created, "tool": last["name"] if last else None, "steps": sum(1 for e in r.events if e["type"] == "tool_call")})
+    live = [{"id": a["id"], "name": a["name"], "description": a["description"], "url": a["url"], "port": a["port"], "uptime": a["uptime"],
+             "session_id": a["session_id"]} for a in artifacts.list() if a["state"] == "live"]
+    files = db.q("""SELECT session_id, json_extract(meta,'$.display.path') AS path, json_extract(meta,'$.display.added') AS added,
+                    json_extract(meta,'$.display.removed') AS removed, json_extract(meta,'$.display.created') AS created_file, created
+                    FROM messages WHERE role='tool' AND json_extract(meta,'$.display.kind')='file' ORDER BY id DESC LIMIT 40""")
+    seen, changed = set(), []
+    for f in files:                     # newest change per file
+        if f["path"] and f["path"] not in seen:
+            seen.add(f["path"]); changed.append({**f, "title": title(f["session_id"])})
+    brief = db.one("SELECT id, title, created FROM sessions WHERE json_extract(meta,'$.auto')='brief' ORDER BY created DESC LIMIT 1")
+    lessons = db.q("SELECT id, text, skill, origin, created FROM lessons ORDER BY created DESC LIMIT 3")
+    ctr = monitor.containers or []
+    services = {"running": sum(1 for c in ctr if c["state"] == "running"), "total": len(ctr),
+                "down": [c["name"].replace("reliquary-", "") for c in ctr if c["state"] != "running" and (c["name"] or "").startswith("reliquary-")
+                         and c["name"] != "reliquary-app-dev"], "known": bool(ctr)}
+    return {"now": now, "live": live, "changed": changed[:6], "brief": brief, "lessons": lessons, "services": services}
 
 
 # ---------------------------------------------------------------- sessions

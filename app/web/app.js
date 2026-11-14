@@ -470,33 +470,126 @@ async function renderHome() {
   if (S.view !== "home") return;
   const d = S.dash;
   $("#hero-status").textContent = heroLine(d);
+  const replies = d.usage.reduce((a, u) => a + u.chats + u.agent_runs, 0);
+  cards.append(h(`<section class="card c-now" id="h-now"></section>`), homeToday(d), h(`<section class="card c-live" id="h-live"></section>`));
+  paintHomeNow(d); paintHomeLive(d);
+  homeServerCard(cards);
   // recent
-  const rec = h(`<section class="card c-recent"><div class="card-h"><h2>Recent</h2><span>${d.totals.sessions} conversation${d.totals.sessions === 1 ? "" : "s"}</span></div><div class="recent-row"></div></section>`);
+  const rec = h(`<section class="card c-recent"><div class="card-h"><h2>Recent</h2><span>${replies} repl${replies === 1 ? "y" : "ies"} this week</span></div><div class="recent-row"></div></section>`);
   const row = $(".recent-row", rec);
   if (!d.recent.length) row.append(h(`<p class="empty-note">Your conversations will gather here.</p>`));
   for (const s of d.recent.slice(0, 6)) {
     row.append(h(`<a class="r-card" href="#/c/${s.id}"><span class="r-title">${s.mode === "agent" ? '<span class="s-title" style="display:inline-flex"><span class="code-tag">code</span></span> ' : ""}${esc(s.title)}</span>
       <span class="r-when">${esc(ago(s.updated))}</span><span class="r-sub">${esc(s.mode === "agent" ? "In " + shortPath(folderOf(s.workspace)) : plain(s.last))}</span></a>`));
   }
-  cards.append(rec);
-  // usage
-  const week = d.usage.reduce((a, u) => a + u.gen_tokens, 0);
-  const replies = d.usage.reduce((a, u) => a + u.chats + u.agent_runs, 0);
-  const max = Math.max(1, ...d.usage.map((u) => u.gen_tokens));
-  const usage = h(`<section class="card c-usage"><div class="card-h"><h2>This week</h2><span>tokens written each day</span></div>
-    <p class="usage-line"><b>${fmtK(week)}</b>tokens across ${replies} repl${replies === 1 ? "y" : "ies"} and tasks</p>
-    <div class="bars">${d.usage.map((u, i) => `<div class="bar ${i === 6 ? "today" : ""}" title="${fmtK(u.gen_tokens)} tokens">
-      <i style="height:${Math.round((u.gen_tokens / max) * 100)}%"></i>${new Date(u.day + "T12:00").toLocaleDateString([], { weekday: "narrow" })}</div>`).join("")}</div>
-    <div class="trio"><div><b>${d.totals.sessions}</b><span>conversations</span></div><div><b>${d.totals.tasks_done}</b><span>tasks done</span></div>
-      <div><b>${d.totals.memories}</b><span>things remembered</span></div></div></section>`);
-  cards.append(usage);
-  homeServerCard(cards);
+  cards.append(rec, homeChanged(d), homeLearned(d));
   const notes = h(`<section class="card c-notes"><div class="card-h"><h2>Notes</h2><a href="#/notes">All notes</a></div><div class="notes-row"></div></section>`);
   if (!d.notes.length) $(".notes-row", notes).append(h(`<p class="empty-note">Ask ${AN()} to "note this" and it lands here.</p>`));
   for (const n of d.notes) $(".notes-row", notes).append(h(`<a class="note-mini" href="#/notes"><b>${esc(n.title)}</b><span>${esc(n.body)}</span></a>`));
   cards.append(notes);
   renderToday(d.tasks, d.overdue);
   setupCard(home, cards);
+}
+
+// ------------------------------------------------------------------ Home cards
+// Right now: what RiRi is doing, or the conversation to pick up
+let homeTick = 0;
+function paintHomeNow(d) {
+  const el = $("#h-now"); if (!el) return;
+  clearInterval(homeTick);
+  const today = new Date().toDateString();
+  const brief = d.brief && new Date(d.brief.created * 1000).toDateString() === today ? d.brief : null;
+  if (d.now.length) {
+    el.innerHTML = `<div class="card-h"><h2>Right now</h2><span>${d.now.length === 1 ? "1 thing" : d.now.length + " things"} in progress</span></div>` +
+      d.now.map((r) => `<a class="now-row" href="#/c/${r.session_id}"><span class="rb-orb now-orb" aria-hidden="true"><i></i></span>
+        <span class="now-main"><b>${esc(r.title || "A conversation")}</b><small>${r.status === "queued" ? "Waiting for the model" : esc(TOOL_NOW[r.tool] || (r.tool ? r.tool.replace(/_/g, " ") : "Thinking"))}${r.steps ? ` · step ${r.steps}` : ""}</small></span>
+        <time class="now-t" data-start="${r.started}">${fmtClock(Date.now() / 1000 - r.started)}</time><span class="now-go">Watch</span></a>`).join("");
+    homeTick = setInterval(() => { if (!document.body.contains(el)) return clearInterval(homeTick); $$(".now-t", el).forEach((t) => (t.textContent = fmtClock(Date.now() / 1000 - +t.dataset.start))); }, 1000);
+    return;
+  }
+  const last = d.recent[0];
+  if (!last && !brief) { el.remove(); return; }
+  el.innerHTML = `<div class="card-h"><h2>Pick up where you left off</h2><span class="now-idle"><i></i>${esc(AN())} is free</span></div>
+    ${last ? `<a class="resume" href="#/c/${last.id}"><span class="resume-main"><b>${esc(last.title)}</b><span>${esc(plain(last.last) || "No reply yet")}</span></span>
+      <span class="resume-side"><small>${esc(ago(last.updated))}</small><span class="btn btn-small">Continue</span></span></a>` : ""}
+    ${brief ? `<a class="resume resume-brief" href="#/c/${brief.id}"><span class="resume-main"><b>Your morning brief</b><span>${esc(brief.title)}</span></span><span class="resume-side"><small>${esc(ago(brief.created))}</small><span class="btn btn-small">Read</span></span></a>` : ""}`;
+}
+// Today: tasks, for when the side panel is hidden (phones, narrow windows)
+function homeToday(d) {
+  const today = new Date().toISOString().slice(0, 10);
+  const card = h(`<section class="card c-today"><div class="card-h"><h2>Today</h2><a href="#/tasks">All tasks</a></div><ul class="ht-list"></ul>
+    <form class="ht-add"><input placeholder="Add a task" aria-label="New task"><button class="btn btn-small" type="submit">Add</button></form></section>`);
+  const ul = $("ul", card);
+  const draw = (tasks) => {
+    ul.innerHTML = "";
+    if (!tasks.length) ul.append(h(`<li class="ht-empty">Nothing on your list. Add one here, or ask ${esc(AN())} to remind you.</li>`));
+    for (const t of tasks.slice(0, 6)) {
+      const over = t.due && t.due.slice(0, 10) < today;
+      const li = h(`<li class="${over ? "over" : ""}"><input type="checkbox" aria-label="Mark done"><span><b></b>${t.due ? `<small>${over ? "Overdue · " : ""}${esc(fmtDue(t.due))}</small>` : ""}</span></li>`);
+      $("b", li).textContent = t.title;
+      $("input", li).onchange = async () => { li.classList.add("done"); await api(`/api/tasks/${t.id}`, { method: "PATCH", body: { done: true } }); setTimeout(() => li.remove(), 350); toast("Nice. Task done."); };
+      ul.append(li);
+    }
+  };
+  draw(d.tasks);
+  $("form", card).onsubmit = async (e) => {
+    e.preventDefault(); const inp = $("input", e.target); if (!inp.value.trim()) return;
+    await api("/api/tasks", { method: "POST", body: { title: inp.value } }); inp.value = "";
+    draw(await api("/api/tasks").then((ts) => ts.filter((t) => !t.done)).catch(() => d.tasks));
+  };
+  return card;
+}
+// Live: what is being served right now, and whether the services are up
+function paintHomeLive(d) {
+  const el = $("#h-live"); if (!el) return;
+  const sv = d.services, svc = !sv.known ? `<span class="hl-svc">Checking services…</span>`
+    : sv.down.length ? `<span class="hl-svc bad"><i></i>${esc(sv.down.join(", "))} ${sv.down.length === 1 ? "is" : "are"} down</span>`
+    : `<span class="hl-svc"><i></i>${sv.running} services running, all healthy</span>`;
+  el.innerHTML = `<div class="card-h"><h2>Live</h2><a href="#/live">Manage</a></div>
+    ${d.live.length ? `<div class="hl-list">${d.live.map((a) => `<div class="hl-row"><span class="hl-dot" aria-hidden="true"></span>
+      <span class="hl-main"><b>${esc(a.name)}</b><small>${esc(a.description || "port " + a.port)}${a.uptime ? " · up " + esc(dur(a.uptime)) : ""}</small></span>
+      <a class="btn btn-small" href="${esc(a.url)}" target="_blank" rel="noopener">Open ↗</a></div>`).join("")}</div>`
+      : `<p class="empty-note">Nothing is being served. Ask ${esc(AN())} to build a page or set up a project and its link shows up here.</p>`}
+    <div class="hl-foot">${svc}</div>`;
+}
+// Files RiRi changed lately, newest first, with the size of each change
+function homeChanged(d) {
+  const card = h(`<section class="card c-changed"><div class="card-h"><h2>Files ${esc(AN())} changed</h2><a href="#/fs">Files</a></div><div class="hc-list"></div></section>`);
+  const list = $(".hc-list", card);
+  if (!d.changed.length) list.append(h(`<p class="empty-note">When ${esc(AN())} writes or edits files, they show up here.</p>`));
+  for (const f of d.changed) {
+    const name = f.path.split("/").pop(), dir = shortPath(f.path.slice(0, -name.length - 1) || "/");
+    const row = h(`<button class="hc-row" type="button" title="${esc(f.path)}">${fileIcon(name, false, false)}<span class="hc-main"><b>${esc(name)}</b><small>${esc(dir)}</small></span>
+      <span class="hc-diff">${f.created_file ? `<em class="new">new</em>` : ""}${f.added ? `<em class="add">+${f.added}</em>` : ""}${f.removed ? `<em class="del">−${f.removed}</em>` : ""}</span><small class="hc-when">${esc(ago(f.created))}</small></button>`);
+    row.onclick = () => openOnServer(f.path);
+    list.append(row);
+  }
+  return card;
+}
+async function openOnServer(path) {
+  const dir = path.replace(/\/[^/]+$/, "") || "/";
+  location.hash = "#/fs/" + encodeURIComponent(dir);
+  for (let i = 0; i < 30 && !$(".fs-view"); i++) await new Promise((r) => setTimeout(r, 100));
+  openFsFile(path);
+}
+// What RiRi learned lately (self-improvement made visible)
+function homeLearned(d) {
+  const card = h(`<section class="card c-learned"><div class="card-h"><h2>${esc(AN())} learned</h2><a href="#/memory">All lessons</a></div><ul class="hlr-list"></ul></section>`);
+  const ul = $("ul", card);
+  if (!d.lessons.length) ul.append(h(`<li class="empty-note">Give a reply a thumbs up or down, or correct ${esc(AN())}: lessons from that land here.</li>`));
+  for (const l of d.lessons) {
+    const li = h(`<li><span class="hlr-tag">${esc(l.skill === "general" ? "general" : l.skill)}</span><p></p><small>${esc(ago(l.created))}${l.origin === "self" ? " · noted while working" : l.origin === "reflect" ? " · from reflection" : l.origin === "owner" ? " · added by you" : ""}</small></li>`);
+    $("p", li).textContent = l.text;
+    ul.append(li);
+  }
+  return card;
+}
+async function refreshHome() {
+  if (S.view !== "home" || typing()) return;
+  const d = await api("/api/dashboard").catch(() => null);
+  if (!d || S.view !== "home") return;
+  S.dash = d; paintHomeNow(d); paintHomeLive(d);
+  const st = $("#hero-status"); if (st) st.textContent = heroLine(d);
 }
 
 // "Finish setting up": the few things only the owner can do, right on Home until they're done.
@@ -2094,11 +2187,12 @@ function onSync(ev) {
     case "run":
       later("sessions", loadSessions); later("status", () => pollStatus(true), 400);
       if (ev.session_id === S.sid && (!S.live || S.live.id !== ev.run_id)) later("open", refreshOpen, 300);
+      if (S.view === "home") later("home", refreshHome, 500);
       break;
     case "tasks": later("tasks", () => { renderToday(); if (S.view === "tasks" && !typing()) renderTasks(); }); break;
     case "notes": if (S.view === "notes") later("notes", () => !typing() && renderNotes()); break;
     case "memories": case "lessons": if (S.view === "memory") later("memory", () => !typing() && renderMemory(), 400); break;
-    case "artifacts": later("artifacts", () => (S.view === "live" ? drawArtifacts() : pollStatus(true))); break;
+    case "artifacts": later("artifacts", () => (S.view === "live" ? drawArtifacts() : S.view === "home" ? refreshHome() : pollStatus(true))); break;
     case "settings": later("settings", async () => { S.settings = await api("/api/settings").catch(() => S.settings); }); break;
   }
 }

@@ -382,6 +382,13 @@ function paintHomeServer(d) {
     cell(`${esc(AN())}'s model`, sp.tg_tps ? sp.tg_tps.toFixed(1) : "–", " tok/s", d.model.online ? (d.model.active ? "working" : "ready") : "offline",
       `<span class="hs-state"><i class="st ${d.model.online ? (d.model.active ? "busy" : "ok") : "bad"}"></i>${esc(prettyModel(d.model.name).replace(/ \(uncensored\)/, ""))}</span>`, d.model.online ? "ok" : "bad");
   $("#hs-live").innerHTML = `<i class="srv-live"></i>up ${upFor(n.host.uptime)}`;
+  // keep the Live card's services line current too (container stats arrive a few seconds after the page opens)
+  const foot = $("#h-live .hl-foot"), ctr = d.containers || [];
+  if (foot && ctr.length) {
+    const down = ctr.filter((c) => c.state !== "running" && (c.name || "").startsWith("reliquary-") && c.name !== "reliquary-app-dev").map((c) => c.name.replace("reliquary-", ""));
+    const run = ctr.filter((c) => c.state === "running").length;
+    foot.innerHTML = down.length ? `<span class="hl-svc bad"><i></i>${esc(down.join(", "))} ${down.length === 1 ? "is" : "are"} down</span>` : `<span class="hl-svc"><i></i>${run} services running, all healthy</span>`;
+  }
 }
 
 // ------------------------------------------------------------------ 05 activity: the one big chart
