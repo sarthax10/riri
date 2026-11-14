@@ -1,9 +1,12 @@
 {$DOMAIN} {
 	encode @compressible zstd gzip
-	@compressible not path /api/runs/*/events
+	@compressible {
+		not path /api/runs/*/events
+		not path /api/fs/raw
+	}
 
 	request_body {
-		max_size 25MB
+		max_size 2GB
 	}
 
 	header {
@@ -12,12 +15,41 @@
 		X-Frame-Options DENY
 		Referrer-Policy no-referrer
 		Permissions-Policy "camera=(), microphone=(self), geolocation=()"
-		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+		# frame-src: RiRi's artifacts, previewed inside conversations and on the Live page
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; connect-src 'self'; frame-src https://*.{$DOMAIN}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 		-Server
 	}
 
 	reverse_proxy app:8000 {
-		# replies stream out token by token
+		# replies stream out token by token, files and video byte by byte
 		flush_interval -1
+	}
+}
+
+# RiRi's artifacts: https://<uuid>.{$DOMAIN}. One wildcard certificate (DNS challenge through DuckDNS), so the
+# random addresses never appear in public certificate logs. The app says which local port each address serves.
+*.{$DOMAIN} {
+	tls {
+		dns duckdns {env.DUCKDNS_TOKEN}
+		resolvers 1.1.1.1 9.9.9.9
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Robots-Tag "noindex, nofollow"
+		Referrer-Policy no-referrer
+		-Server
+	}
+
+	route {
+		request_header -X-Art-Upstream
+		forward_auth app:8000 {
+			uri /api/artifacts/gate
+			copy_headers X-Art-Upstream
+		}
+		reverse_proxy {http.request.header.X-Art-Upstream} {
+			header_up -X-Art-Upstream
+			flush_interval -1
+		}
 	}
 }

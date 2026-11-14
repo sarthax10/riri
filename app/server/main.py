@@ -11,6 +11,10 @@ from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import tools as T
+from .artifacts import Artifacts
+from .learning import Learner
+from .monitor import Monitor
+from .sync import Hub
 from .auth import Auth, hash_password, check_password, check_totp, new_totp_secret
 from .db import DB
 from .llm import LLM
@@ -29,7 +33,57 @@ engine = Engine(db, llm)
 push = Push(db, DATA)
 engine.push = push
 scheduler = Scheduler(db, engine, push)
+artifacts = T.artifacts = scheduler.artifacts = Artifacts(db, T.host)
+hub = engine.hub = Hub()
+monitor = Monitor(T.host)
+learner = T.learner = engine.learner = scheduler.learner = Learner(db, engine, llm)
+learner.on_change = lambda: hub.publish("lessons")
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+
+# Every successful change through the API becomes a sync event, so other tabs and devices update without a refresh.
+SYNC_TOPICS = {"tasks": "tasks", "notes": "notes", "memories": "memories", "artifacts": "artifacts", "settings": "settings",
+               "lessons": "lessons"}
+
+
+def publish_change(method, path):
+    parts = path.strip("/").split("/")   # api, <topic>, [id], [action]
+    if len(parts) < 2 or parts[0] != "api":
+        return
+    topic = parts[1]
+    if topic == "sessions":
+        if len(parts) == 2:
+            hub.publish("sessions")
+        elif method == "DELETE" and len(parts) == 3:
+            hub.publish("sessions", deleted=parts[2])
+        else:
+            hub.publish("session", sid=parts[2])
+    elif topic == "messages":
+        hub.publish("sessions")
+    elif topic in SYNC_TOPICS:
+        hub.publish(SYNC_TOPICS[topic])
+
+
+class SyncEvents:
+    """Plain ASGI middleware (streams pass straight through): after a successful change, publish a sync event."""
+    def __init__(self, inner):
+        self.inner = inner
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope["method"] not in ("POST", "PUT", "PATCH", "DELETE"):
+            return await self.inner(scope, receive, send)
+        status = {}
+
+        async def watch(msg):
+            if msg["type"] == "http.response.start":
+                status["code"] = msg["status"]
+            await send(msg)
+        await self.inner(scope, receive, watch)
+        if status.get("code", 500) < 400:
+            publish_change(scope["method"], scope["path"])
+
+
+app.add_middleware(SyncEvents)
 COOKIE = "rq_session"
 STARTED = time.time()
 
@@ -55,10 +109,17 @@ def require_server():
 async def on_startup():
     err = await T.host.setup()
     print("server access: " + ("ready, home " + T.host.home if not err else "NOT ready: " + err), flush=True)
+    if not err:
+        try:
+            back = await artifacts.setup()
+            print(f"artifacts bind {artifacts.bind}" + (f"; restarted {', '.join(back)}" if back else ""), flush=True)
+        except Exception as e:
+            print("artifacts: setup failed:", repr(e), flush=True)
     resumed = engine.resume_interrupted()
     if resumed:
         print(f"resumed {len(resumed)} interrupted repl{'y' if len(resumed) == 1 else 'ies'}: {', '.join(resumed)}", flush=True)
     app.state.scheduler_task = asyncio.create_task(scheduler.loop())
+    app.state.monitor_task = asyncio.create_task(monitor.loop())
 
 
 # ---------------------------------------------------------------- auth
@@ -83,6 +144,14 @@ async def body(request: Request):
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
+
+@app.get("/api/events")
+async def events(request: Request, after: str = "", kind=Depends(need)):
+    """The live sync channel (Server-Sent Events). Last-Event-ID or ?after= resumes from a cursor."""
+    cursor = request.headers.get("last-event-id") or after
+    return StreamingResponse(hub.stream(request, cursor), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.get("/api/auth/state")
@@ -172,7 +241,8 @@ def server_health():
 @app.get("/api/status")
 async def status(kind=Depends(need)):
     props = await llm.props()
-    return {"model": props, "online": await llm.health(), "engine": engine.status(), "server": server_health()}
+    return {"model": props, "online": await llm.health(), "engine": engine.status(), "server": server_health(),
+            "artifacts_live": db.one("SELECT COUNT(*) AS n FROM artifacts WHERE state='live'")["n"]}
 
 
 @app.get("/api/dashboard")
@@ -290,7 +360,11 @@ async def send(sid: str, request: Request, kind=Depends(need)):
         raise HTTPException(400, "Write a message first.")
     if engine.active_run(sid):
         raise HTTPException(409, "This session is still working. Stop it or wait for it to finish.")
-    db.add_message(sid, "user", text)
+    learner.check_correction(sid, text)
+    learner.last_activity = time.time()
+    skills = [w for w in ("artifacts", "coding", "research", "server", "design", "explainers") if w in text.lower()]
+    lessons = learner.note_for(text, skills)
+    db.add_message(sid, "user", text, meta={"lessons": lessons} if lessons else None)
     if (s["title"] in ("New chat", "") or s["title"].startswith("New task in ")) and not db.one("SELECT 1 FROM messages WHERE session_id=? AND role='assistant'", (sid,)):
         db.update_session(sid, title=auto_title(text))
     run = engine.start(db.session(sid), "agent" if s["mode"] == "agent" else "chat")
@@ -322,9 +396,10 @@ async def compact(sid: str, request: Request, kind=Depends(need)):
 @app.post("/api/sessions/{sid}/regenerate")
 async def regenerate(sid: str, kind=Depends(need)):
     s = session_or_404(sid)
+    learner.signal(sid, "regenerated", "The owner asked for this reply again (the first one wasn't good enough).")
     if engine.active_run(sid):
         raise HTTPException(409, "This session is still working.")
-    last_user = db.one("SELECT MAX(id) AS m FROM messages WHERE session_id=? AND role='user'", (sid,))["m"]
+    last_user = db.one("SELECT MAX(id) AS m FROM messages WHERE session_id=? AND role='user' AND meta NOT LIKE '%\"hidden\": true%'", (sid,))["m"]
     if not last_user:
         raise HTTPException(400, "Nothing to regenerate.")
     db.x("DELETE FROM messages WHERE session_id=? AND id>?", (sid, last_user))
@@ -336,6 +411,8 @@ async def export(sid: str, kind=Depends(need)):
     s = session_or_404(sid)
     lines = [f"# {s['title']}", ""]
     for m in db.messages(sid):
+        if m["meta"].get("hidden"):
+            continue
         if m["role"] == "user":
             lines += ["## You", "", m["content"], ""]
         elif m["role"] == "assistant" and m["content"]:
@@ -572,7 +649,7 @@ async def del_memory(mid: int, kind=Depends(need)):
 # ---------------------------------------------------------------- settings
 DEFAULT_SETTINGS = {"assistant_name": "RiRi", "name": "", "instructions": "", "effort": "low", "approval": "ask", "notify": True,
                     "server_requires_2fa": True,
-                    "brief_enabled": True, "brief_time": "07:30", "brief_city": "", "brief_topics": ""}
+                    "brief_enabled": True, "brief_time": "07:30", "brief_city": "", "brief_topics": "", "learning": True}
 
 
 @app.get("/api/settings")
@@ -624,6 +701,36 @@ async def fs_list(path: str = "~", kind=Depends(need)):
     return await fs("list", path=path)
 
 
+@app.get("/api/fs/search")
+async def fs_search(path: str = "~", q: str = "", mode: str = "name", hidden: int = 0, kind=Depends(need)):
+    """Files whose name matches (fuzzy, ranked) or lines that contain the text, under a folder."""
+    require_server()
+    q = q.strip()
+    if len(q) < 2:
+        return {"items": [], "mode": mode}
+    if mode != "content":
+        r = await T.host.fs("find", path=path, q=q, hidden=bool(hidden), timeout=30)
+        if r.get("error"):
+            raise HTTPException(400, r["error"])
+        return {**r, "mode": "name"}
+    excl = " ".join(f"--exclude-dir={d}" for d in ("node_modules", ".git", "__pycache__", ".venv", "venv", ".cache", "dist", "build", ".next"))
+    # '.[!.]*', not '.*': the latter also matches ".", the folder being searched, and grep would skip everything
+    hid = "" if hidden else "--exclude='.*' --exclude-dir='.[!.]*'"
+    cmd = (f"timeout 15 grep -rnIiF {excl} {hid} --exclude='*.min.js' --exclude='*.map' -m 5 -e {T._sh(q)} . 2>/dev/null "
+           f"| cut -c1-400 | head -300")
+    res = await T.host.exec(cmd, path, timeout=30)
+    files = {}
+    for line in (res.get("output") or "").splitlines():
+        parts = line.split(":", 2)
+        if len(parts) < 3 or not parts[1].isdigit():
+            continue
+        rel = parts[0][2:] if parts[0].startswith("./") else parts[0]
+        files.setdefault(rel, []).append({"line": int(parts[1]), "text": parts[2].strip()[:240]})
+    base = (await T.host.fs("stat", path=path)).get("path", path)
+    items = [{"path": base.rstrip("/") + "/" + rel, "rel": rel, "matches": m} for rel, m in files.items()]
+    return {"base": base, "items": items[:120], "mode": "content", "truncated": len(items) > 120 or res.get("timed_out")}
+
+
 @app.get("/api/fs/read")
 async def fs_read(path: str, kind=Depends(need)):
     return await fs("read", path=path, limit=2_000_000)
@@ -664,6 +771,79 @@ async def fs_download(path: str, kind=Depends(need)):
     return RawResponse(data, media_type="application/octet-stream", headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
+RAW_INLINE = ("image/", "video/", "audio/", "application/pdf", "text/plain")
+
+
+@app.api_route("/api/fs/raw", methods=["GET", "HEAD"])
+async def fs_raw(path: str, request: Request, dl: int = 0, kind=Depends(need)):
+    """A file's bytes, streamed, with Range support so videos and songs can seek. Anything that could run script
+    on this site (HTML, SVG, JS...) is only ever sent as a sandboxed download."""
+    import mimetypes
+    st = await fs("stat", path=path)
+    if st.get("dir"):
+        raise HTTPException(400, "That is a folder.")
+    size = int(st["size"])
+    name = path.rstrip("/").split("/")[-1].replace('"', "") or "file"
+    ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
+    if ctype.startswith("text/") or ctype in ("application/json", "application/xml"):
+        ctype = "text/plain; charset=utf-8"
+    inline = not dl and ctype.startswith(RAW_INLINE) and ctype != "image/svg+xml"
+    from urllib.parse import quote
+    headers = {"Accept-Ranges": "bytes", "Cache-Control": "private, max-age=300",
+               "Content-Disposition": f"{'inline' if inline else 'attachment'}; filename*=UTF-8''{quote(name)}",
+               "Last-Modified": time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime(st.get("mtime") or 0))}
+    if ctype != "application/pdf":
+        headers["Content-Security-Policy"] = "sandbox; default-src 'none'; img-src 'self'; media-src 'self'"
+    if not inline:
+        ctype = "application/octet-stream"
+    start, end, status = 0, size - 1, 200
+    m = re.match(r"bytes=(\d*)-(\d*)$", request.headers.get("range", "").strip())
+    if m and size:
+        if m.group(1):
+            start = int(m.group(1))
+            end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+        elif m.group(2):  # the last N bytes
+            start = max(0, size - int(m.group(2)))
+        if start >= size or start > end:
+            return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
+        status = 206
+        headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+    length = max(0, end - start + 1) if size else 0
+    headers["Content-Length"] = str(length)
+    if request.method == "HEAD" or not length:
+        return Response(status_code=status, headers=headers, media_type=ctype)
+    return StreamingResponse(T.host.stream(path, start, length), status_code=status, headers=headers, media_type=ctype)
+
+
+@app.get("/api/img")
+async def img_proxy(u: str, kind=Depends(need)):
+    """Pictures from the web (search results, page previews, images in replies), fetched by the server so the
+    browser only ever talks to this site."""
+    import httpx
+    from urllib.parse import urlparse
+    url = urlparse(u)
+    if url.scheme not in ("http", "https") or not url.hostname:
+        raise HTTPException(400, "Not a web address.")
+    try:
+        T._public_host(url.hostname)
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True,
+                                     headers={"User-Agent": T.UA, "Accept": "image/avif,image/webp,image/*;q=0.9,*/*;q=0.5"}) as c:
+            async with c.stream("GET", u) as r:
+                T._public_host(r.url.host)
+                ctype = r.headers.get("content-type", "").split(";")[0].strip().lower()
+                if r.status_code >= 400 or not ctype.startswith("image/"):
+                    raise HTTPException(404, "Not an image.")
+                data = b""
+                async for chunk in r.aiter_bytes():
+                    data += chunk
+                    if len(data) > 8_000_000:
+                        raise HTTPException(413, "Image too large.")
+    except (httpx.HTTPError, ValueError):
+        raise HTTPException(404, "Couldn't fetch that image.")
+    return Response(data, media_type=ctype, headers={"Cache-Control": "private, max-age=86400",
+                                                     "Content-Security-Policy": "sandbox; default-src 'none'"})
+
+
 @app.post("/api/fs/upload")
 async def fs_upload(request: Request, path: str, kind=Depends(need)):
     require_server()
@@ -672,6 +852,153 @@ async def fs_upload(request: Request, path: str, kind=Depends(need)):
     if r.get("error"):
         raise HTTPException(400, r["error"])
     return r
+
+
+# ---------------------------------------------------------------- the Server page
+@app.get("/api/system")
+async def system(since: float = 0, kind=Depends(need)):
+    v = monitor.view(since)
+    props = await llm.props()
+    v["model"] = {"name": props.get("model"), "ctx": props.get("n_ctx"), "online": await llm.health(),
+                  "speed": engine.status()["speed"], "busy": engine.status()["busy"],
+                  "active": len([r for r in engine.runs.values() if r.finished is None])}
+    v["app"] = {"uptime": time.time() - STARTED, "sessions": db.one("SELECT COUNT(*) AS n FROM sessions")["n"],
+                "artifacts_live": db.one("SELECT COUNT(*) AS n FROM artifacts WHERE state='live'")["n"]}
+    return v
+
+
+@app.post("/api/system/storage")
+async def system_storage(kind=Depends(need)):
+    asyncio.create_task(monitor.read_storage())
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- artifacts
+@app.get("/api/artifacts")
+async def list_artifacts(kind=Depends(need)):
+    rows = artifacts.list()
+    for a in rows:
+        s = db.session(a["session_id"]) if a.get("session_id") else None
+        a["session_title"] = s["title"] if s else None
+    from .artifacts import FIREWALL_FIX
+    blocked = await artifacts.firewall_blocked() if any(a["state"] == "live" for a in rows) else False
+    return {"artifacts": rows, "domain": os.environ.get("RELIQUARY_DOMAIN", ""), "bind": artifacts.bind,
+            "firewall_blocked": blocked, "firewall_fix": FIREWALL_FIX}
+
+
+def artifact_or_404(aid):
+    a = artifacts.get(aid)
+    if not a:
+        raise HTTPException(404, "No such artifact.")
+    return a
+
+
+@app.post("/api/artifacts/{aid}/start")
+async def start_artifact(aid: str, kind=Depends(need)):
+    require_server()
+    artifact_or_404(aid)
+    rec, msg, ok = await artifacts.start(aid=aid)
+    return {"ok": ok, "message": msg, "artifact": rec}
+
+
+@app.post("/api/artifacts/{aid}/stop")
+async def stop_artifact(aid: str, kind=Depends(need)):
+    require_server()
+    artifact_or_404(aid)
+    await artifacts.stop(aid)
+    return {"ok": True, "artifact": artifacts.public(artifacts.get(aid))}
+
+
+@app.patch("/api/artifacts/{aid}")
+async def patch_artifact(aid: str, request: Request, kind=Depends(need)):
+    artifact_or_404(aid)
+    d = await body(request)
+    for k, n in (("name", 80), ("description", 300)):
+        if k in d:
+            db.x(f"UPDATE artifacts SET {k}=? WHERE id=?", (str(d[k] or "")[:n], aid))
+    return artifacts.public(artifacts.get(aid))
+
+
+@app.delete("/api/artifacts/{aid}")
+async def delete_artifact(aid: str, kind=Depends(need)):
+    require_server()
+    artifact_or_404(aid)
+    await artifacts.delete(aid)
+    return {"ok": True}
+
+
+@app.get("/api/artifacts/{aid}/logs")
+async def artifact_logs(aid: str, lines: int = 200, kind=Depends(need)):
+    require_server()
+    artifact_or_404(aid)
+    return {"log": await artifacts.logs(aid, lines)}
+
+
+@app.get("/api/artifacts/gate")
+async def artifact_gate(request: Request):
+    """Caddy's forward_auth for *.DOMAIN: 200 plus where to send the request, or the page to show instead.
+    Public on purpose: the random address is the key, like a share link."""
+    upstream, page = artifacts.gate(request.headers.get("x-forwarded-host") or request.headers.get("host"))
+    if page:
+        status, html = page
+        return Response(html, status_code=status, media_type="text/html", headers={"Cache-Control": "no-store"})
+    return Response(status_code=200, headers={"X-Art-Upstream": upstream})
+
+
+# ---------------------------------------------------------------- learning
+@app.post("/api/messages/{mid}/feedback")
+async def feedback(mid: int, request: Request, kind=Depends(need)):
+    d = await body(request)
+    m = db.one("SELECT * FROM messages WHERE id=?", (mid,))
+    if not m or m["role"] != "assistant":
+        raise HTTPException(404, "No such reply.")
+    meta = json.loads(m["meta"] or "{}")
+    value = 1 if d.get("value", 0) > 0 else -1 if d.get("value", 0) < 0 else 0
+    note = str(d.get("note") or "")[:500]
+    meta["feedback"] = {"value": value, "note": note}
+    db.x("UPDATE messages SET meta=? WHERE id=?", (json.dumps(meta), mid))
+    if value < 0:
+        learner.signal(m["session_id"], "thumbs_down", note or "The owner disliked this reply.")
+    elif value > 0:
+        learner.signal(m["session_id"], "thumbs_up", note or "The owner liked this reply: note what worked.")
+    return {"ok": True}
+
+
+@app.get("/api/lessons")
+async def list_lessons(kind=Depends(need)):
+    return {"lessons": learner.lessons(), "pending": len(learner.pending()), "busy": learner.busy, "enabled": learner.enabled()}
+
+
+@app.post("/api/lessons")
+async def add_lesson(request: Request, kind=Depends(need)):
+    d = await body(request)
+    lid = learner.add(d.get("text", ""), d.get("skill", "general"), "owner")
+    if not lid:
+        raise HTTPException(400, "Write the lesson as a sentence.")
+    return {"ok": True, "id": lid}
+
+
+@app.patch("/api/lessons/{lid}")
+async def edit_lesson(lid: int, request: Request, kind=Depends(need)):
+    d = await body(request)
+    if d.get("text"):
+        db.x("UPDATE lessons SET text=?, updated=? WHERE id=?", (str(d["text"])[:300], time.time(), lid))
+    return {"ok": True}
+
+
+@app.delete("/api/lessons/{lid}")
+async def del_lesson(lid: int, kind=Depends(need)):
+    db.x("DELETE FROM lessons WHERE id=?", (lid,))
+    return {"ok": True}
+
+
+@app.post("/api/lessons/reflect")
+async def reflect_now(kind=Depends(need)):
+    """Review the flagged conversations now instead of waiting for an idle moment."""
+    if not learner.pending():
+        return {"added": [], "message": "Nothing to reflect on yet: no flagged conversations."}
+    added = await learner.reflect(force=True)
+    return {"added": added, "message": f"Learned {len(added)} new lesson{'s' if len(added) != 1 else ''}." if added else "Reviewed it; nothing new to learn."}
 
 
 # ---------------------------------------------------------------- notifications
@@ -723,7 +1050,7 @@ async def index():
     # Version the app's own files by start time, so after every update browsers fetch the new ones.
     html = open(os.path.join(WEB, "index.html"), encoding="utf-8").read()
     v = str(int(STARTED))
-    for f in ("/app.css", "/app.js", "/reli.js"):
+    for f in ("/app.css", "/app.js", "/reli.js", "/media.js", "/server.js", "/icons.js"):
         html = html.replace(f'"{f}"', f'"{f}?v={v}"')
     return Response(html, media_type="text/html", headers={"Cache-Control": "no-cache"})
 

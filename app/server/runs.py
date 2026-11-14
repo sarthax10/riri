@@ -16,6 +16,46 @@ import uuid
 
 from . import tools as T
 
+import re as _re
+
+_MAKE = _re.compile(r"\b(build|make|create|design|generate|put together|code up|spin up|set up|setup|deploy|host|serve|draw)\b", _re.I)
+_THING = _re.compile(r"\b(artifact|web ?page|website|site|landing page|dashboard|explainer|interactive|web ?app|app|tool|game|"
+                     r"visuali[sz]ation|infographic|slides?|deck|presentation|calculator|tracker|chart|graph|timeline|page|ui|"
+                     r"prototype|demo|portfolio|report)\b", _re.I)
+_PROJECT = _re.compile(r"\b(clone|git clone|github\.com|set ?up (the|this|a) (repo|project)|run (the|this|a) (repo|project|app))\b", _re.I)
+
+
+def route_note(text):
+    """A short note for the model (never shown to the owner) when a message asks for something to look at or use.
+    Small models follow a nudge in the turn far better than a rule deep in the system prompt."""
+    t = text or ""
+    if _re.match(r"\s*(how (do|can|should|would) (i|we)|how to|what|why|which|should (i|we)|is it|explain)\b", t, _re.I):
+        return ""   # asking for advice, not asking for the thing
+    skills = []
+    if _PROJECT.search(t):
+        skills = ["artifacts", "coding"]
+    elif _MAKE.search(t) and _THING.search(t):
+        # the artifacts skill carries the content.json schema (charts, diagrams, sliders…), so one or two loads do
+        skills = ["artifacts"]
+        if _re.search(r"\b(explain|explainer|how .* works|teach|guide|interactive)\b", t, _re.I):
+            skills.append("explainers")
+        if _re.search(r"\b(slides?|deck|presentation)\b", t, _re.I):
+            skills.append("slides")
+    elif _re.search(r"\b(diagram|flowchart|architecture|draw)\b", t, _re.I):
+        return "\n\n[App note: a diagram helps here. Load the diagrams skill and use a ```mermaid block.]"
+    if not skills:
+        return ""
+    return ("\n\n[App note, not from the owner: this asks for something to open and use. First call load_skill for: "
+            + ", ".join(skills) + " (one call each). Then research if facts are needed, then build it on the server "
+            "with tools: run artifact-new, write content.json, run artifact-new --check, then artifact_start. Never paste "
+            "the page's code or content into the chat; the owner gets a live preview card. Finish with two sentences and "
+            "the link.]")
+
+
+NUDGE = ("[App note, not from the owner: you haven't built it yet, and the owner asked for something to open. "
+         "Don't repeat your answer. Now build it with tools: run artifact-new, write content.json from what you found, "
+         "run artifact-new --check, then artifact_start. Then reply with two sentences and the link.]")
+
 MAX_AGENT_STEPS = 40
 CONTEXT_STOP = 0.88  # stop an agent run when the conversation fills this share of the context window
 
@@ -34,7 +74,7 @@ You run on a slow CPU: every word you write costs time.
 closing offers.
 - Use a tool only when it changes the answer. Search the web for anything recent, local, priced or uncertain.
 - Exact maths and data: run_python. Dates: the calendar in the context note; further out, run_python.
-- Markdown for structure; fenced code blocks with a language tag (```bash, ```python …) for code and commands.
+- Markdown for structure; fenced code blocks with a language tag (```bash, ```python …) for code and commands. A ```mermaid block is drawn as a diagram: use one when structure or flow explains it better than words (load the diagrams skill).
 
 # The server
 You have a shell and the file system of the server, as {name}'s user: run, read_file, write_file, edit_file, \
@@ -57,7 +97,8 @@ say so explicitly.
 # Your other tools
 - Tasks, notes, memory: add_task, list_tasks, complete_task, save_note, update_note, search_notes, remember, forget. \
 Remember lasting facts about {name} without asking.
-- Internet: web_search, then read_webpage on the one or two best results. Cite sources as Markdown links.
+- Internet: web_search, then read_webpage on the one or two best results. Cite sources as Markdown links. Ask for images (images: true) when pictures help: people, places, products, things to look at.
+- Artifacts: when {name} wants something to look at or use (a page, a dashboard, a tool, a game, a chart, a demo app), build it in a folder under ~/artifacts/ and serve it with artifact_start; {name} gets a live preview and a private link. Load the artifacts skill first (it explains content.json, which a designed renderer turns into the page), plus explainers or slides when they fit. Restart with the same id after edits; artifact_list and artifact_logs to manage them. \nWhen you clone, set up or run a project with a web interface or API, serve it the same way so {name} gets a link.
 - Skills: before a task that matches one, call load_skill with its name and follow it:
 {skills}"""
 
@@ -119,6 +160,8 @@ class Engine:
         self.runs[run.id] = run
         self._mark(session["id"], kind)
         run.task = asyncio.create_task(self._main(run))
+        if getattr(self, "hub", None):
+            self.hub.publish("run", session_id=session["id"], run_id=run.id, state="started")
         self._gc()
         return run
 
@@ -196,6 +239,15 @@ class Engine:
                 if not fut.done():
                     fut.cancel()
             self.db.touch(run.session_id)
+            if getattr(self, "hub", None):
+                self.hub.publish("run", session_id=run.session_id, run_id=run.id, state=run.status)
+            if getattr(self, "learner", None):
+                self.learner.last_activity = time.time()
+                if getattr(run, "user_stopped", False):
+                    self.learner.signal(run.session_id, "stopped", "The owner stopped this reply before it finished.")
+                errs = getattr(run, "tool_errors", [])
+                if len(errs) >= 2:
+                    self.learner.signal(run.session_id, "tool_errors", "; ".join(errs[:6]))
             if self.on_finish:
                 asyncio.create_task(self.on_finish(run, run.status))
 
@@ -236,7 +288,9 @@ class Engine:
             if m["meta"].get("compacted"):
                 continue
             if m["role"] == "user":
-                msgs.append({"role": "user", "content": (context + m["content"]) if first_user and context else m["content"]})
+                text = m["content"] + (route_note(m["content"]) if not (m["meta"].get("summary") or m["meta"].get("hidden")) else "") \
+                    + (m["meta"].get("lessons") or "")
+                msgs.append({"role": "user", "content": (context + text) if first_user and context else text})
                 first_user = False
             elif m["role"] == "assistant":
                 item = {"role": "assistant", "content": m["content"] or ""}
@@ -322,15 +376,49 @@ class Engine:
     async def _agent(self, run, session):
         await self._converse(run, session)
 
+    def _real_links(self, session, content):
+        """Small models sometimes write a template ("https://<random-id>.<domain>/") instead of the address the
+        tool gave them. Swap in the real link of whatever was served since the owner's last message."""
+        msgs = self.db.messages(session["id"])
+        last = next((i for i in range(len(msgs) - 1, -1, -1) if msgs[i]["role"] == "user" and not msgs[i]["meta"].get("hidden")), 0)
+        served = [m["meta"]["display"]["artifact"] for m in msgs[last:] if m["role"] == "tool" and m["meta"].get("ok")
+                  and (m["meta"].get("display") or {}).get("kind") == "artifact"]
+        if not served:
+            return content
+        a = served[-1]
+        fixed = _re.sub(r"<?https?://[^\s)\]]*<[^\s)\]]*", a["url"], content)
+        fixed = _re.sub(r"<(random-id|uuid|id|domain|your-domain)>", "", fixed)
+        if a["url"] not in fixed:
+            fixed = fixed.rstrip() + f"\n\n**[Open {a['name']}]({a['url']})**"
+        return fixed
+
+    def _artifact_owed(self, session):
+        """True when the owner's latest message asked for something to open and no artifact was served since."""
+        msgs = self.db.messages(session["id"])
+        last = next((i for i in range(len(msgs) - 1, -1, -1) if msgs[i]["role"] == "user" and not msgs[i]["meta"].get("hidden")), None)
+        if last is None or "something to open and use" not in route_note(msgs[last]["content"]):
+            return False
+        return not any(m["role"] == "tool" and m["meta"].get("name") == "artifact_start" and m["meta"].get("ok")
+                       for m in msgs[last + 1:])
+
     async def _converse(self, run, session):
         """The one conversation loop: the model replies, calls tools, sees results, until it answers."""
         for step in range(MAX_AGENT_STEPS):
             msgs = self._history(session)
             content, reasoning, calls, timings = await self._generate(run, session, msgs, T.ALL_TOOLS)
+            if not calls and content:
+                content = self._real_links(session, content)
             mid = self.db.add_message(session["id"], "assistant", content, reasoning or None, calls or None,
                                       meta=self._meta_from(timings))
             await run.emit("message", id=mid, role="assistant", content=content, reasoning=reasoning,
                            tool_calls=calls, meta=self._meta_from(timings))
+            if not calls and not getattr(run, "nudged", False) and self._artifact_owed(session):
+                # asked for something to open, but about to stop without serving it: one quiet reminder, then go on
+                run.nudged = True
+                self.db.add_message(session["id"], "user", NUDGE, meta={"hidden": True, "nudge": True})
+                if getattr(self, "learner", None):
+                    self.learner.signal(session["id"], "nudged", "You tried to finish without building what the owner asked for; the app had to remind you.")
+                continue
             if not calls:
                 # finished: whatever was in progress is done now, so the checklist doesn't stay half-open
                 todos = (self.db.session(session["id"]) or session)["meta"].get("todos") or []
@@ -379,7 +467,9 @@ class Engine:
         files = self.db.get("slot_files", {})  # sid -> {"file": name, "t": last used}
         if owner:
             used = {v["file"] for k, v in files.items() if k != owner}
-            free = [f"s{i}.bin" for i in range(self.SLOT_FILES) if f"s{i}.bin" not in used]
+            # a separate prefix per app (the preview copy uses "dev-"), so two apps never overwrite each other's state
+            pre = os.environ.get("RELIQUARY_SLOT_PREFIX", "")
+            free = [f"{pre}s{i}.bin" for i in range(self.SLOT_FILES) if f"{pre}s{i}.bin" not in used]
             if not free or len(files) >= self.SLOT_KEEP + (owner in files):
                 lru = min((k for k in files if k not in (owner, sid)), key=lambda k: files[k]["t"], default=None)
                 if lru:
@@ -417,6 +507,7 @@ class Engine:
         except ValueError:
             args = None
         await run.emit("tool_call", id=call["id"], name=name, args=args if args is not None else call["function"]["arguments"])
+        display = None
         if args is None:
             out, ok = "Error: the tool arguments were not valid JSON. Send them again as a JSON object.", False
         elif name == "todo":
@@ -455,8 +546,15 @@ class Engine:
                     self.db.update_session(session["id"], meta=session["meta"])
             if allowed:
                 await run.emit("phase", phase="tool", name=name)
-                out, ok = await T.execute(self.db, T.session_cwd(session), name, args)
+                res = await T.execute(self.db, T.session_cwd(session), name, args, session["id"])
+                out, ok = res[0], res[1]
+                display = res[2] if len(res) > 2 else None
             else:
                 out, ok = "The owner declined this action. Ask what they would like instead, or try another way.", False
-        mid = self.db.add_message(session["id"], "tool", out, tool_call_id=call["id"], meta={"name": name, "ok": ok})
-        await run.emit("tool_result", id=call["id"], message_id=mid, name=name, ok=ok, output=out)
+        meta = {"name": name, "ok": ok}
+        if display:
+            meta["display"] = display
+        if not ok and not out.startswith("The owner declined"):
+            run.tool_errors = getattr(run, "tool_errors", []) + [f"{name}: {out[:160]}"]
+        mid = self.db.add_message(session["id"], "tool", out, tool_call_id=call["id"], meta=meta)
+        await run.emit("tool_result", id=call["id"], message_id=mid, name=name, ok=ok, output=out, display=display)

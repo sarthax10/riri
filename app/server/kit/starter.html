@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en" data-theme="paper">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TITLE</title>
+<!-- One family pair per theme. Keep only the line for your theme:
+  paper:  Fraunces + Inter Tight     ink:   Instrument Serif + Inter Tight     night: Funnel Display + Geist
+  studio: Space Grotesk + Inter      grove: DM Serif Display + DM Sans -->
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400..700&family=Inter+Tight:wght@400..700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="kit.css">
+<style>
+  /* page-specific styles go here; reuse the kit's variables (var(--accent), var(--space-5)…) */
+</style>
+</head>
+<body>
+  <header class="page topbar">
+    <a class="brand" href="#"><i></i>NAME</a>
+    <nav class="nav"><a href="#one">Section one</a><a href="#two">Section two</a><a href="#sources">Sources</a></nav>
+  </header>
+
+  <main>
+    <section class="page hero">
+      <p class="eyebrow">KICKER</p>
+      <h1 class="display">A specific, confident headline</h1>
+      <p class="lede">One or two sentences that say what this is and why it matters. Concrete, not hype.</p>
+    </section>
+
+    <section class="page section" id="one">
+      <div class="split">
+        <div><p class="eyebrow">01</p><h2>Section title</h2><p>Text.</p></div>
+        <div class="card">Content, figure or chart.</div>
+      </div>
+    </section>
+
+    <section class="page section" id="sources">
+      <h2>Sources</h2>
+      <ol class="sources"><li><a href="https://example.com">Title</a>, publisher, date</li></ol>
+    </section>
+  </main>
+
+  <footer class="page footer">Made by RiRi · DATE</footer>
+  <script src="kit.js"></script>
+</body>
+</html>

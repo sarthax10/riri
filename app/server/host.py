@@ -19,8 +19,16 @@ HELPER_PATH = ".local/share/riri/fs.py"  # relative to the owner's home on the h
 MAX_READ = 1_500_000
 
 HELPER = r'''
-import base64, json, os, shutil, stat, sys, time
+import base64, difflib, json, os, shutil, stat, sys, time
 def out(x): sys.stdout.write(json.dumps(x)); sys.stdout.flush()
+def stats(old, new):
+    """Lines added and removed, like a diffstat (skipped for very large files)."""
+    if len(old) + len(new) > 3000000: return None, None
+    a, b = old.splitlines(), new.splitlines(); add = rem = 0
+    for l in difflib.unified_diff(a, b, lineterm="", n=0):
+        if l.startswith("+") and not l.startswith("+++"): add += 1
+        elif l.startswith("-") and not l.startswith("---"): rem += 1
+    return add, rem
 op, args = sys.argv[1], json.loads(sys.argv[2])
 home = os.path.expanduser("~")
 P = lambda p: os.path.abspath(os.path.expanduser(p or "~"))
@@ -47,17 +55,25 @@ try:
     elif op == "write":
         p = P(args["path"]); os.makedirs(os.path.dirname(p), exist_ok=True)
         data = base64.b64decode(sys.stdin.read()) if args.get("b64") else sys.stdin.read().encode()
+        existed = os.path.exists(p); old = b""
+        if existed and not args.get("b64"):
+            try:
+                with open(p, "rb") as f: old = f.read(3000001)
+            except OSError: pass
         tmp = p + ".riri-tmp"
         with open(tmp, "wb") as f: f.write(data)
-        if os.path.exists(p): shutil.copymode(p, tmp)
-        os.replace(tmp, p); out({"ok": True, "path": p, "size": len(data)})
+        if existed: shutil.copymode(p, tmp)
+        os.replace(tmp, p)
+        add, rem = (None, None) if args.get("b64") else stats(old.decode("utf-8", "replace"), data.decode("utf-8", "replace"))
+        out({"ok": True, "path": p, "size": len(data), "created": not existed, "added": add, "removed": rem})
     elif op == "edit":
         p = P(args["path"]); text = open(p, encoding="utf-8").read(); n = text.count(args["old"])
         if n != 1:
             out({"ok": False, "count": n})
         else:
             with open(p, "w", encoding="utf-8") as f: f.write(text.replace(args["old"], args["new"], 1))
-            out({"ok": True, "path": p})
+            add, rem = stats(args["old"], args["new"])
+            out({"ok": True, "path": p, "added": add, "removed": rem})
     elif op == "mkdir":
         p = P(args["path"]); os.makedirs(p, exist_ok=True); out({"ok": True, "path": p})
     elif op == "rename":
@@ -68,8 +84,34 @@ try:
         p = P(args["path"]); t = os.path.join(home, ".local/share/riri/trash", time.strftime("%Y%m%d-%H%M%S"))
         os.makedirs(t, exist_ok=True); shutil.move(p, os.path.join(t, os.path.basename(p)))
         out({"ok": True, "trash": t})
+    elif op == "find":
+        base = P(args.get("path")); q = args["q"].lower(); hidden = args.get("hidden"); budget = time.time() + 6
+        skip = {"node_modules", ".git", "__pycache__", ".venv", "venv", ".cache", ".npm", ".cargo", "site-packages", ".local", "snap", "proc"}
+        def score(name, rel):
+            n = name.lower()
+            if n == q: return 100
+            if n.startswith(q): return 80
+            if q in n: return 60 - min(20, n.index(q))
+            if q in rel.lower(): return 30
+            i = 0                                  # fuzzy: the letters of q appear in order in the name
+            for ch in n:
+                if i < len(q) and ch == q[i]: i += 1
+            return 15 if i == len(q) else 0
+        hits, seen, truncated = [], 0, False
+        for dirpath, dirs, files in os.walk(base):
+            dirs[:] = [d for d in dirs if d not in skip and (hidden or not d.startswith("."))]
+            for name in dirs + files:
+                if not hidden and name.startswith("."): continue
+                full = os.path.join(dirpath, name); rel = os.path.relpath(full, base); s = score(name, rel)
+                seen += 1
+                if s: hits.append((-s, rel.count("/"), rel, name in dirs))
+            if time.time() > budget or seen > 400000:
+                truncated = True; break
+        hits.sort()
+        out({"base": base, "truncated": truncated, "items": [{"path": os.path.join(base, r), "rel": r, "dir": d} for _, _, r, d in hits[:150]]})
     elif op == "stat":
-        p = P(args["path"]); st = os.stat(p); out({"path": p, "dir": os.path.isdir(p), "size": st.st_size, "home": home})
+        p = P(args["path"]); st = os.stat(p)
+        out({"path": p, "dir": os.path.isdir(p), "size": st.st_size, "mtime": st.st_mtime, "home": home})
     else:
         out({"error": "unknown op"})
 except FileNotFoundError: out({"error": "No such file or folder."})
@@ -78,6 +120,16 @@ except IsADirectoryError: out({"error": "That is a folder, not a file."})
 except NotADirectoryError: out({"error": "That is a file, not a folder."})
 except Exception as e: out({"error": str(e)[:300]})
 '''
+
+
+def qpath(p):
+    """Shell-quotes a path for the host's bash, keeping a leading ~ expandable."""
+    p = str(p)
+    if p == "~":
+        return "~"
+    if p.startswith("~/"):
+        return "~/" + shlex.quote(p[2:])
+    return shlex.quote(p)
 
 
 class Host:
@@ -121,6 +173,15 @@ class Host:
             # gpt-oss writes multi-file edits in OpenAI's apply_patch format; give it that command on the server
             patcher = open(os.path.join(os.path.dirname(__file__), "apply_patch.py"), encoding="utf-8").read()
             await self._run("mkdir -p ~/.local/bin && cat > ~/.local/bin/apply_patch && chmod 755 ~/.local/bin/apply_patch", patcher, 30)
+            # the design kit for artifacts (kit.css, kit.js, starter.html) and its `artifact-new` scaffold command
+            kit = os.path.join(os.path.dirname(__file__), "kit")
+            for f in ("kit.css", "kit.js", "starter.html", "render.js", "content.html", "content.json"):
+                await self._run(f"mkdir -p ~/.local/share/riri/kit && cat > ~/.local/share/riri/kit/{f}",
+                                open(os.path.join(kit, f), encoding="utf-8").read(), 30)
+            await self._run("cat > ~/.local/share/riri/stats.py",
+                            open(os.path.join(os.path.dirname(__file__), "stats_helper.py"), encoding="utf-8").read(), 30)
+            await self._run("cat > ~/.local/bin/artifact-new && chmod 755 ~/.local/bin/artifact-new",
+                            open(os.path.join(kit, "artifact_new.py"), encoding="utf-8").read(), 30)
         if code == 0 and "ok:" in text:
             self.home = text.split("ok:")[-1].strip()
             self.ready = True
@@ -156,6 +217,28 @@ class Host:
             return json.loads(out.decode("utf-8", errors="replace"))
         except ValueError:
             return {"error": out.decode(errors="replace")[-300:] or "no answer"}
+
+    async def stream(self, path, start=0, length=None, chunk=256 * 1024):
+        """Yields the bytes of a file on the host, from start for length bytes, without holding it in memory.
+        The ssh process is killed if the reader stops early (a browser seeking in a video does that)."""
+        if not self.ready and await self.setup():
+            return
+        rng = f"tail -c +{int(start) + 1} -- {qpath(path)}" + (f" | head -c {int(length)}" if length is not None else "")
+        proc = await asyncio.create_subprocess_exec(*self._ssh(), rng, stdin=asyncio.subprocess.DEVNULL,
+                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        try:
+            while True:
+                data = await proc.stdout.read(chunk)
+                if not data:
+                    break
+                yield data
+        finally:
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            await proc.wait()
 
     async def read_bytes(self, path):
         r = await self.fs("read", path=path, raw=True, limit=200_000_000, timeout=300)

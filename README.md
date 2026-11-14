@@ -25,11 +25,13 @@ change. Everything — the model, the website, the search engine, your data — 
 | **Talks** | A calm dark web app with your conversation history, live progress, streaming replies, Markdown and code. |
 | **Works the server** | A shell and the whole file system as your user: inspect, fix, deploy, manage Docker. Changes wait for your OK (or switch a chat to *Auto*). |
 | **Codes** | Point her at any folder — or a git URL — and she plans with a live checklist, edits, runs the tests and tells you what changed. |
-| **Files** | Browse, edit, upload and download anything on the server from the browser. Deletes go to a trash you can restore from. |
+| **Builds things you can open** | Ask for a page, dashboard, tool or game — or to clone and run a project — and she serves it as an *artifact* at its own private link, `https://<uuid>.your-domain`, with a live preview in the chat. The **Live** page lists what's running, on which port, with stop/start and logs. |
+| **Files** | Browse, edit, upload and download anything on the server. Code opens highlighted with line numbers (and edits in place), pictures in a zoomable viewer, video and music in a proper player that streams and seeks. Deletes go to a trash. |
 | **Remembers** | Tasks with timed reminders, notes, long-term memories, and a morning brief written for you before you wake up. |
 | **Reaches you** | Web push notifications for reminders, finished replies and approvals — installable on your phone's home screen. |
-| **Browses** | Private web search through a built-in SearXNG instance, plus a page reader. |
-| **Knows how** | Skills (playbooks for coding, debugging, research, writing, planning, data…) loaded only when a task needs them. |
+| **Browses** | Private web search through a built-in SearXNG instance, plus a page reader. Pictures and sources show up in the chat as she researches. |
+| **Knows how** | Skills (playbooks for coding, debugging, research, writing, planning, data, design, diagrams, explainers, charts, slides…) loaded only when a task needs them. |
+| **Designs** | Artifacts start from a small design system on the server (`artifact-new`: five tested themes, type pairings, components, chart and diagram styles), with a design skill that bans the usual AI-slop tells. In the chat she draws Mermaid diagrams and SVG sketches inline. |
 | **Terminal too** | `riri` on the server: the same conversations in a styled terminal client. |
 
 <br>
@@ -42,6 +44,7 @@ flowchart LR
   sslh -->|TLS| caddy[Caddy<br/>certificates, headers]
   sslh -->|SSH| sshd[(host sshd)]
   caddy --> app[RiRi app<br/>FastAPI · SQLite]
+  caddy -->|*.domain| arts[artifacts<br/>ports 9100-9199]
   app --> llm[llama-server<br/>gpt-oss-20b, CPU]
   app --> search[SearXNG<br/>private search]
   app --> bench[workbench<br/>Python sandbox]
@@ -54,7 +57,7 @@ flowchart LR
 | **App** (`app/`) | API, engine and the web UI (no framework, no third-party requests: fonts and libraries are bundled). |
 | **Workbench** (`workbench/`) | A locked-down container for throwaway Python. |
 | **SearXNG** (`searxng/`) | Web search without an API key or tracking. |
-| **Caddy + sslh** | HTTPS with automatic certificates; SSH and HTTPS share port 443. |
+| **Caddy + sslh** | HTTPS with automatic certificates (plus one wildcard certificate for artifacts, through DuckDNS, so their random addresses never appear in public certificate logs); SSH and HTTPS share port 443. |
 
 <br>
 
@@ -81,7 +84,7 @@ A GPU or a second RAM stick makes everything faster; nothing in the design depen
 
 ```bash
 git clone https://github.com/sarthax10/riri.git ~/reliquary && cd ~/reliquary
-cp .env.example .env && chmod 600 .env          # then fill in DOMAIN, HOST_USER, WORKBENCH_TOKEN
+cp .env.example .env && chmod 600 .env          # then fill in DOMAIN, HOST_USER, WORKBENCH_TOKEN, DUCKDNS_TOKEN
 mkdir -p ~/llm/models && curl -L -o ~/llm/models/gpt-oss-20b-Q4_K_M.gguf \
   https://huggingface.co/unsloth/gpt-oss-20b-GGUF/resolve/main/gpt-oss-20b-Q4_K_M.gguf
 docker compose up -d --build
@@ -93,6 +96,12 @@ To let RiRi work on the server, authorise her key once (it only works from Docke
 
 ```bash
 echo "from=\"172.16.0.0/12\",no-port-forwarding,no-agent-forwarding,no-X11-forwarding $(cat data/host_key.pub)" >> ~/.ssh/authorized_keys
+```
+
+If `ufw` is on, let Caddy reach the artifact ports (only from Docker's networks, not the LAN):
+
+```bash
+sudo ufw allow from 172.16.0.0/12 to 172.17.0.1 port 9100:9199 proto tcp comment 'RiRi artifacts'
 ```
 
 Then open your domain, sign in, and turn on **two-step sign-in** — server access stays locked until you do.
@@ -115,12 +124,13 @@ repository — the workflow reads it from your repository settings (**Settings �
 | `DEPLOY_SSH_KEY` | private half of a deploy-only key pair (`ssh-keygen -t ed25519 -f riri-deploy`) |
 | `DEPLOY_KNOWN_HOSTS` | `ssh-keyscan -p <port> <host>` |
 | `WORKBENCH_TOKEN` | `openssl rand -hex 32` |
+| `DUCKDNS_TOKEN` | your DuckDNS token, for the artifacts' wildcard certificate |
 
 <br>
 
 ## &nbsp;—&nbsp; In the chat box
 
-Type `/` for commands: `/new` · `/code [folder]` · `/compact` (summarise to free the model's memory) · `/files` ·
+Type `/` for commands: `/new` · `/code [folder]` · `/live` · `/compact` (summarise to free the model's memory) · `/files` ·
 `/effort low|medium|high` · `/auto` · `/ask` · `/rename` · `/remember` · `/task` · `/note` · `/search` ·
 `/export` · `/delete` · `/help`
 
@@ -132,6 +142,7 @@ Type `/` for commands: `/new` · `/code [folder]` · `/compact` (summarise to fr
 - **Shell and file access require two-step sign-in.** RiRi acts as an ordinary user (no passwordless sudo); her SSH key is only accepted from the app's Docker networks.
 - Commands and file changes need your approval unless you switch a conversation to *Auto*. Deleted files go to a trash folder.
 - The model server and search engine are not exposed to the internet. Pages RiRi reads can't point her at private addresses.
+- Artifacts listen only on the Docker bridge address, never the home network; each is reachable only through its unguessable link, and serving one needs your OK like any command.
 - Nightly backups (`backup.sh`) of conversations, tasks, notes, memories and settings.
 
 <br>

@@ -22,7 +22,9 @@ description: building a feature or making a change in a codebase, start to finis
    Twice failed on the same idea → stop and report what you know.
 8. **Multi-place edits**: `apply_patch` is installed on the server. Pipe it a patch:
    `apply_patch <<'EOF'` … `*** Begin Patch` / `*** Update File: path` / `@@` / `-old` / `+new` / `*** End Patch` … `EOF`.
-9. **Finish** with 2-3 sentences: what changed (files), how you verified, anything left for the owner.
+9. **Anything with a web UI or API** (a cloned project, a new app): serve it with `artifact_start` so the owner
+   gets a live link. Load the artifacts skill for the host/port rules.
+10. **Finish** with 2-3 sentences: what changed (files), how you verified, anything left for the owner.
 
 Useful commands on the server: `python3 -m pytest -q path`, `python3 -m venv .venv && . .venv/bin/activate`,
 `pip install pkg` (inside a venv), `npm ci`, `npm test`, `node file.js`, `git status`, `git diff --stat`,

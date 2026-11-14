@@ -4,10 +4,12 @@ Server tools act on the real server (as the owner's user, over SSH; see host.py)
 working folder. run_python uses the separate, locked-down workbench sandbox for quick calculations. Assistant tools
 manage tasks, notes and memories in the database. Every result is capped so one tool can't flood the context.
 """
+import asyncio
 import json
 import os
 import re
 import time
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -23,6 +25,8 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 SCRATCH = "riri-scratch"  # where run_python works (in the sandbox); hidden from the workspace list
 
 host = Host()
+artifacts = None  # set by main: the Artifacts manager (artifacts.py)
+learner = None    # set by main: lessons from experience (learning.py)
 # Set by main: returns None when server tools may be used, or a message explaining why they are locked.
 server_gate = lambda: None
 
@@ -64,15 +68,31 @@ ASSISTANT_TOOLS = [
     fn("search_notes", "Find the owner's notes containing some words.", {"query": S}, ["query"]),
     fn("remember", "Remember a lasting fact or preference about the owner for future conversations.", {"fact": S}, ["fact"]),
     fn("forget", "Delete remembered facts that contain the given words.", {"words": S}, ["words"]),
+    fn("learn", "Save a lesson for your future self: a specific, reusable way to work better that you just discovered "
+       "(how this server is set up, a mistake to avoid, what finally worked). Not facts about the owner: use remember.",
+       {"lesson": S, "skill": {"type": "string", "description": "artifacts, coding, research, server, writing, planning, data, design, debugging or general"}}, ["lesson"]),
     fn("run_python", "Run a short Python 3 script in a throwaway sandbox (not on the server) and get its printed "
        "output. Use it for exact maths, dates, unit conversions and data. print() what you need.", {"code": S}, ["code"]),
 ]
 
 WEB_TOOLS = [
     fn("web_search", "Search the internet. Use it for news, current facts, prices, docs, or anything you are not sure "
-       "about. Returns titles, links and snippets.", {"query": S}, ["query"]),
+       "about. Returns titles, links and snippets. Set images to true when pictures would help the owner (people, "
+       "places, products, animals, food, design, events): they appear above your answer.",
+       {"query": S, "images": {"type": "boolean"}}, ["query"]),
     fn("read_webpage", "Open a web page by URL and read its text. Use it after web_search to read a promising result.",
        {"url": S}, ["url"]),
+]
+
+ARTIFACT_TOOLS = [
+    fn("artifact_start", "Serve a web page or app from a folder on the server at its own private address "
+       "(https://<random-id>.<domain>/), shown to the owner as a live preview. With no command, the folder's "
+       "index.html is served as a static site. With a command, it must listen on $HOST and $PORT. Pass id to restart "
+       "an existing artifact on the same address after changing it. Load the artifacts skill first.",
+       {"name": S, "folder": S, "command": S, "description": S, "id": S}, ["folder"]),
+    fn("artifact_stop", "Stop serving an artifact (its files stay).", {"id": S}, ["id"]),
+    fn("artifact_list", "List the artifacts: which are live, their addresses, ports and folders.", {}),
+    fn("artifact_logs", "Read the end of an artifact's output log, to debug it.", {"id": S, "lines": I}, ["id"]),
 ]
 
 PLAN_TOOL = fn("todo", "Write or update your plan for a multi-step task as a checklist the owner can watch. Send the "
@@ -84,11 +104,11 @@ SKILL_TOOL = fn("load_skill", "Load one of your skills: step-by-step know-how fo
                 "starting that kind of task.", {"name": S}, ["name"])
 
 # One tool list for every conversation, so the cached prompt opening is shared by all of them.
-ALL_TOOLS = SERVER_TOOLS + ASSISTANT_TOOLS + WEB_TOOLS + [PLAN_TOOL, SKILL_TOOL]
+ALL_TOOLS = SERVER_TOOLS + ASSISTANT_TOOLS + WEB_TOOLS + ARTIFACT_TOOLS + [PLAN_TOOL, SKILL_TOOL]
 ASSISTANT_TOOLS_FULL = CODE_TOOLS = ALL_TOOLS  # older names, kept for callers
 
-NEEDS_APPROVAL = {"run", "write_file", "edit_file"}
-SERVER_TOOL_NAMES = {t["function"]["name"] for t in SERVER_TOOLS}
+NEEDS_APPROVAL = {"run", "write_file", "edit_file", "artifact_start"}
+SERVER_TOOL_NAMES = {t["function"]["name"] for t in SERVER_TOOLS + ARTIFACT_TOOLS}
 
 
 # ---------------------------------------------------------------- skills
@@ -184,15 +204,54 @@ async def run_command(workspace, command, timeout=120):
 
 
 # ---------------------------------------------------------------- web
-async def web_search(query):
+def _host(url):
+    h = (urlparse(url).hostname or "").lower()
+    return h[4:] if h.startswith("www.") else h
+
+
+def _web_url(u, base=None):
+    u = (u or "").strip()
+    if u.startswith("//"):
+        u = "https:" + u
+    if base and u and not u.startswith(("http://", "https://")):
+        u = urljoin(base, u)
+    return u if u.startswith(("http://", "https://")) and len(u) < 2000 else ""
+
+
+async def web_search(query, images=False):
+    """Returns (text for the model, what the owner sees: sources and pictures)."""
     async with httpx.AsyncClient(timeout=25) as c:
-        r = await c.get(SEARXNG + "/search", params={"q": query, "format": "json", "safesearch": 0})
-        r.raise_for_status()
-        results = r.json().get("results", [])[:6]
+        async def get(**extra):
+            r = await c.get(SEARXNG + "/search", params={"q": query, "format": "json", "safesearch": 0, **extra})
+            r.raise_for_status()
+            return r.json().get("results", [])
+        jobs = [get()] + ([get(categories="images")] if images else [])
+        got = await asyncio.gather(*jobs, return_exceptions=True)
+    if isinstance(got[0], Exception):
+        raise got[0]
+    results = got[0][:6]
+    pics, seen = [], set()
+    for x in (got[1] if len(got) > 1 and not isinstance(got[1], Exception) else []):
+        src = _web_url(x.get("img_src"))
+        if not src or src in seen:
+            continue
+        seen.add(src)
+        page = _web_url(x.get("url"))
+        pics.append({"src": src, "thumb": _web_url(x.get("thumbnail_src") or x.get("thumbnail")) or src,
+                     "title": (x.get("title") or "").strip()[:140], "page": page, "host": _host(page or src)})
+        if len(pics) >= 10:
+            break
+    display = {"kind": "search", "query": query, "images": pics,
+               "sources": [{"title": (x.get("title") or "").strip()[:160], "url": x.get("url", ""), "host": _host(x.get("url", ""))}
+                           for x in results if x.get("url")]}
     if not results:
-        return "No results."
-    return "\n\n".join(f"{i}. {x.get('title', '').strip()}\n{x.get('url', '')}\n{(x.get('content') or '').strip()[:300]}"
+        return "No results.", display
+    text = "\n\n".join(f"{i}. {x.get('title', '').strip()}\n{x.get('url', '')}\n{(x.get('content') or '').strip()[:300]}"
                        for i, x in enumerate(results, 1))
+    if pics:
+        text += (f"\n\n({len(pics)} pictures are already shown to the owner above your answer. Don't list, link or "
+                 "embed them, and don't add a Pictures section; just answer.)")
+    return text, display
 
 
 def _public_host(hostname):
@@ -238,14 +297,37 @@ async def read_webpage(url):
                 if len(body) > 1_500_000:
                     break
     text = body.decode(r.encoding or "utf-8", errors="replace")
+    page = {"kind": "page", "url": str(r.url), "host": _host(str(r.url)), "title": "", "image": "", "description": ""}
     if "html" in ctype:
+        page.update(page_meta(text, str(r.url)))
         text = html_to_text(text)
-    return clip(f"{r.url}\n\n{text}", 9000), True
+    return clip(f"{r.url}\n\n{text}", 9000), True, page
+
+
+def page_meta(raw, base):
+    """Title, description and preview image of a page, from its <head>."""
+    import html as H
+    head = raw[:200_000]
+
+    def meta(*names):
+        for n in names:
+            m = re.search(r"<meta[^>]+(?:property|name)=[\"']" + re.escape(n) + r"[\"'][^>]*>", head, re.I)
+            if m:
+                c = re.search(r"content=[\"']([^\"']*)[\"']", m.group(0), re.I)
+                if c and c.group(1).strip():
+                    return H.unescape(c.group(1).strip())
+        return ""
+    t = re.search(r"(?is)<title[^>]*>(.*?)</title>", head)
+    return {"title": (meta("og:title", "twitter:title") or (H.unescape(t.group(1)).strip() if t else ""))[:200],
+            "description": meta("og:description", "description", "twitter:description")[:300],
+            "image": _web_url(meta("og:image", "og:image:url", "twitter:image", "twitter:image:src"), base)}
 
 
 # ---------------------------------------------------------------- the dispatcher
-async def execute(db, cwd, name, args):
-    """Runs one tool. Returns (output_text, ok). cwd is the conversation's working folder on the server."""
+async def execute(db, cwd, name, args, session_id=None):
+    """Runs one tool. Returns (output_text, ok) or (output_text, ok, display): display is extra data for the owner's
+    screen only (pictures, sources, an artifact card), never sent to the model. cwd is the conversation's working
+    folder on the server."""
     try:
         if name in SERVER_TOOL_NAMES:
             locked = server_gate()
@@ -270,7 +352,10 @@ async def execute(db, cwd, name, args):
             return clip((body or "(empty file)") + more, 16000), True
         if name == "write_file":
             r = await host.fs("write", stdin=args.get("content", ""), path=resolve(cwd, args["path"]))
-            return (f"Wrote {r['path']} ({r['size']} bytes)." if r.get("ok") else "Error: " + r.get("error", "write failed")), bool(r.get("ok"))
+            if not r.get("ok"):
+                return "Error: " + r.get("error", "write failed"), False
+            return (f"{'Created' if r.get('created') else 'Wrote'} {r['path']} ({r['size']} bytes).", True,
+                    {"kind": "file", "path": r["path"], "created": r.get("created"), "added": r.get("added"), "removed": r.get("removed")})
         if name == "edit_file":
             r = await host.fs("edit", path=resolve(cwd, args["path"]), old=args["old"], new=args["new"])
             if r.get("error"):
@@ -279,7 +364,7 @@ async def execute(db, cwd, name, args):
                 n = r.get("count", 0)
                 return ("Error: the old text was not found. Read the file again and copy the snippet exactly." if n == 0 else
                         f"Error: the old text appears {n} times. Include more surrounding lines so it is unique."), False
-            return f"Edited {r['path']}.", True
+            return f"Edited {r['path']}.", True, {"kind": "file", "path": r["path"], "added": r.get("added"), "removed": r.get("removed")}
         if name == "list_files":
             depth = max(1, min(int(args.get("depth") or 2), 3))
             p = resolve(cwd, args.get("path"))
@@ -304,16 +389,37 @@ async def execute(db, cwd, name, args):
             key = args["name"].strip()
             if key not in sk:
                 return "No skill called that. Available: " + ", ".join(sk), False
-            return sk[key][1], True
+            return sk[key][1] + (learner.for_skill(key) if learner else ""), True
         if name == "run_python":
             res = await run_command(SCRATCH, "cat > /tmp/riri_run.py <<'RIRI_PY_EOF'\n" + args["code"] + "\nRIRI_PY_EOF\n"
                                     "timeout 60 python3 /tmp/riri_run.py", 75)
             out = res.get("output") or "(no output — use print())"
             return clip(out + ("" if res.get("exit") == 0 else f"\n[exit code {res.get('exit')}]")), res.get("exit") == 0
         if name == "web_search":
-            return clip(await web_search(args["query"])), True
+            text, display = await web_search(args["query"], bool(args.get("images")))
+            return clip(text), True, display
         if name == "read_webpage":
             return await read_webpage(args["url"])
+        if name == "artifact_start":
+            rec, msg, ok = await artifacts.start(args.get("name"), args.get("folder") or args.get("path") or cwd, args.get("command"),
+                                                 args.get("description"), (args.get("id") or "").strip() or None, session_id)
+            if not rec:
+                return "Error: " + msg, False
+            head = (f"Artifact \"{rec['name']}\" (id {rec['id']}) on port {rec['port']}, serving {rec['dir']}.\n"
+                    f"Address: {rec['url']}\nLocal address (for checks with curl from the server): "
+                    f"http://{artifacts.bind}:{rec['port']}/\n")
+            note = ("The owner sees a live preview card with this address. Give them the link."
+                    if ok else "Fix the problem, then call artifact_start again with this id.")
+            return clip(head + msg + "\n" + note), ok, {"kind": "artifact", "artifact": rec}
+        if name == "artifact_stop":
+            ok = await artifacts.stop(args["id"].strip())
+            return ("Stopped." if ok else "No artifact with that id."), ok
+        if name == "artifact_list":
+            rows = artifacts.list()
+            return "\n".join(f"- {a['name']} [{a['state']}] id {a['id']}, port {a['port']}, {a['url']} - folder {a['dir']}, "
+                             f"command: {a['command']}" for a in rows) or "No artifacts yet.", True
+        if name == "artifact_logs":
+            return clip(await artifacts.logs(args["id"].strip(), args.get("lines") or 80)), True
         if name == "add_task":
             due = None
             if args.get("due"):
@@ -350,6 +456,9 @@ async def execute(db, cwd, name, args):
             like = f"%{args['query']}%"
             rows = db.q("SELECT id,title,body FROM notes WHERE title LIKE ? OR body LIKE ? ORDER BY updated DESC LIMIT 8", (like, like))
             return clip("\n\n".join(f"#{r['id']} {r['title']}\n{r['body'][:600]}" for r in rows) or "No matching notes."), True
+        if name == "learn":
+            lid = learner.add(args["lesson"], args.get("skill") or "general", "self") if learner else None
+            return ("Lesson saved. It will come back when it's relevant." if lid else "That lesson was too short to keep."), bool(lid)
         if name == "remember":
             db.x("INSERT INTO memories(fact,created) VALUES(?,?)", (args["fact"], time.time()))
             return "Remembered.", True

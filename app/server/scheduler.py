@@ -12,6 +12,9 @@ BRIEF_PROMPT = ("Prepare my morning brief for today. Load the morning-brief skil
 class Scheduler:
     def __init__(self, db, engine, push):
         self.db, self.engine, self.push = db, engine, push
+        self.artifacts = None  # set by main
+        self.learner = None    # set by main
+        self.ticks = 0
         try:
             db.x("ALTER TABLE tasks ADD COLUMN notified INTEGER NOT NULL DEFAULT 0")
         except Exception:
@@ -32,6 +35,14 @@ class Scheduler:
             await asyncio.sleep(30)
 
     async def tick(self):
+        self.ticks += 1
+        if self.artifacts and self.ticks % 2 == 0:  # every minute: notice artifacts whose process died
+            try:
+                await self.artifacts.check()
+            except Exception as e:
+                print("artifact check failed:", repr(e), flush=True)
+        if self.learner:
+            await self.learner.idle_tick()
         now = time.localtime()
         today, hhmm = time.strftime("%Y-%m-%d", now), time.strftime("%H:%M", now)
         s = self.settings()

@@ -48,6 +48,7 @@ jobs:
           USER: ${{ vars.DEPLOY_USER }}
           DIR: ${{ vars.DEPLOY_PATH || '~/reliquary' }}
           WORKBENCH_TOKEN: ${{ secrets.WORKBENCH_TOKEN }}
+          DUCKDNS_TOKEN: ${{ secrets.DUCKDNS_TOKEN }}
         run: |
           {
             echo "DOMAIN=${{ vars.DOMAIN }}"
@@ -59,6 +60,7 @@ jobs:
             echo "CACHE_RAM=${{ vars.CACHE_RAM || '0' }}"
             [ -n "${{ vars.CADDY_DATA_VOLUME }}" ] && echo "CADDY_DATA_VOLUME=${{ vars.CADDY_DATA_VOLUME }}"
             echo "WORKBENCH_TOKEN=$WORKBENCH_TOKEN"
+            echo "DUCKDNS_TOKEN=$DUCKDNS_TOKEN"
           } > env.out
           scp -i ~/.ssh/deploy -P "$PORT" env.out "$USER@$HOST:/tmp/riri.env"
           rm env.out

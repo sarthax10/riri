@@ -1,0 +1,70 @@
+{
+  "meta": {
+    "theme": "grove",
+    "title": "How a solar panel makes electricity",
+    "name": "Solar, explained",
+    "eyebrow": "Explainer · Energy",
+    "headline": "Sunlight knocks electrons loose, and a wire gives them somewhere to go",
+    "lede": "A silicon solar cell turns about a fifth of the light that hits it into electricity, with no moving parts. Here is the whole trick in four steps.",
+    "hero_stats": [
+      { "value": 22, "unit": "%", "label": "efficiency of a good rooftop panel" },
+      { "value": 1000, "unit": "W/m²", "label": "sunlight at noon on a clear day" },
+      { "value": 25, "unit": "years", "label": "typical power warranty" }
+    ],
+    "footer": "Made by RiRi",
+    "updated": "14 Nov 2026"
+  },
+  "sections": [
+    {
+      "type": "text", "title": "It starts with a sandwich of silicon", "nav": "How it works",
+      "body": "A cell is two thin layers of silicon, doped differently so one has spare electrons (**n-type**) and the other is missing some (**p-type**). Where they meet, an electric field forms.\n\nWhen a photon with enough energy hits the silicon, it frees an electron. The field pushes it one way, and a metal grid collects it.",
+      "aside": { "type": "diagram", "mermaid": "flowchart TD\n  sun([Sunlight]) --> cell[Silicon cell]\n  cell -->|frees electrons| field{p-n junction}\n  field -->|pushes them out| grid[Metal grid]\n  grid --> inv[Inverter]\n  inv -->|AC| home[(Your home)]", "caption": "Light in, direct current out; the inverter turns it into household AC." }
+    },
+    {
+      "type": "steps", "title": "Four steps from photon to plug", "interactive": true, "nav": "Steps",
+      "items": [
+        { "title": "Absorb", "body": "Silicon absorbs photons with more energy than its band gap (1.1 eV), roughly all visible light." },
+        { "title": "Separate", "body": "The junction's field sweeps freed electrons to the n side and holes to the p side." },
+        { "title": "Collect", "body": "Thin silver fingers on the front carry the current out without blocking much light." },
+        { "title": "Convert", "body": "An inverter changes the panel's DC into AC at your grid's voltage and frequency." }
+      ]
+    },
+    {
+      "type": "comparison", "title": "Rooftop vs. utility-scale", "columns": ["Rooftop", "Utility"],
+      "rows": [
+        { "label": "Typical size", "values": [6, 100000], "unit": "kW" },
+        { "label": "Efficiency", "values": [21, 22], "unit": "%" }
+      ],
+      "source": "[NREL](https://www.nrel.gov/), 2025"
+    },
+    {
+      "type": "chart", "title": "Panels got 90% cheaper in a decade", "subtitle": "Module price, US$ per watt", "kind": "line",
+      "labels": ["2010", "2012", "2014", "2016", "2018", "2020", "2022"],
+      "series": [{ "name": "Price", "values": [2.0, 0.8, 0.65, 0.4, 0.3, 0.2, 0.25] }],
+      "unit": "$/W", "source": "[IRENA](https://www.irena.org/), 2023"
+    },
+    {
+      "type": "slider", "title": "What would your roof make?",
+      "input": { "label": "Panel area", "min": 5, "max": 60, "step": 1, "value": 20, "unit": "m²" },
+      "output": { "label": "electricity per day, at 5 sun-hours and 20% efficiency", "formula": "x * 1 * 5 * 0.2", "unit": "kWh", "decimals": 1 },
+      "marks": [{ "label": "Small roof", "value": 10 }, { "label": "Family home", "value": 30 }],
+      "note": "Area × 1 kW/m² × 5 h × 20%. Real output depends on angle, shade and season."
+    },
+    {
+      "type": "timeline", "title": "A short history", "nav": "History",
+      "items": [
+        { "date": "1839", "title": "Becquerel sees the photovoltaic effect", "body": "Light falling on electrodes in a solution makes a current." },
+        { "date": "1954", "title": "Bell Labs makes the first silicon cell", "body": "About 6% efficient: enough to run a small radio." },
+        { "date": "1958", "title": "Vanguard 1 goes up", "body": "The first solar-powered satellite; it is still in orbit." }
+      ]
+    },
+    { "type": "callout", "title": "What's still hard", "body": "Storage. Panels make the most at noon; homes use the most in the evening. Batteries close the gap, at a cost." },
+    {
+      "type": "sources",
+      "items": [
+        { "title": "Solar Photovoltaic Technology Basics", "url": "https://www.nrel.gov/research/re-photovoltaics.html", "publisher": "NREL", "date": "2025" },
+        { "title": "Renewable Power Generation Costs", "url": "https://www.irena.org/publications", "publisher": "IRENA", "date": "2023" }
+      ]
+    }
+  ]
+}
